@@ -103,7 +103,7 @@ async def scrape_product(page: Page, url: str) -> ProductData:
         await mouse_jitter(page, steps=4)
 
         # ── Anchor on the PDP container ───────────────────────────────────────
-        root = page.locator("//html/body/section/main/div/div[1]/div[2]")
+        root = page.locator("//html/body/div[2]/section/main/div/div[1]/div[2]")
         await root.wait_for(state="visible", timeout=15_000)
 
         # ── 1. Names ──────────────────────────────────────────────────────────

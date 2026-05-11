@@ -1,4 +1,59 @@
+from __future__ import annotations
+
+import logging
 from dataclasses import dataclass
+from pathlib import Path
+
+logger = logging.getLogger("scraper")
+
+
+# ---------------------------------------------------------------------------
+# Search-query loader
+# ---------------------------------------------------------------------------
+
+
+def get_search_queries(path: str = "Book1.xlsx") -> tuple[str, ...]:
+    """
+    Read search queries from the *second column* of every row in *path*.
+    Blank / whitespace-only cells are silently skipped.
+
+    Raises FileNotFoundError if the workbook does not exist so the caller
+    gets a clear error rather than a silent empty tuple.
+    """
+    xlsx_path = Path(path)
+    if not xlsx_path.exists():
+        raise FileNotFoundError(
+            f"Search-query workbook not found: '{xlsx_path.resolve()}'. "
+            "Create Book1.xlsx with queries in column B."
+        )
+
+    from openpyxl import load_workbook  # lazy import — only needed at startup
+
+    wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+    ws = wb.active
+    queries: list[str] = []
+    counter = 0
+    for row in ws.iter_rows(min_col=2, max_col=2, values_only=True):
+        if counter == 0:
+            counter += 1
+            continue
+        val = row[0]
+        if val is not None and str(val).strip():
+            queries.append(str(val).strip())
+    wb.close()
+
+    if not queries:
+        logger.warning(
+            "get_search_queries: no queries found in column B of '%s'.", path
+        )
+
+    logger.info("get_search_queries: loaded %d queries from '%s'.", len(queries), path)
+    return tuple(queries)
+
+
+# ---------------------------------------------------------------------------
+# Scraper configuration
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -10,19 +65,6 @@ class ScraperConfig:
     search_input_xpath: str = '//*[@id="header"]/div[1]/div[1]/div[1]/form/div[1]/input'
     search_button_xpath: str = (
         '//*[@id="header"]/div[1]/div[1]/div[1]/form/div[1]/div[1]/svg'
-    )
-
-    search_queries: tuple[str, ...] = (
-        "مپ  کرم پودر تیوپی m010",
-        "ادکلن دیویدوف کول واتر 125م",
-        "بورژوا  کرم پودر ایرمت 01",
-        "لورال پرایمر تیوپی اینفالیبل 35 میل",
-        "مک کرم پودر استودیو فیکسNC41",
-        "رومنس ریمل سفید در مشکی",
-        "فلورمار کرم پودر شیشه ای مات 303",
-        "رکسونا اسپری بدن مردانه وی 8",
-        "پیپا ریمل  503+507",
-        "استیلادر کرم پودر شیشه ای 1w2",
     )
 
     # Xpath selectors (adapt to target site)
@@ -49,8 +91,8 @@ class ScraperConfig:
     # Timing (seconds)
     min_delay: float = 0.8
     max_delay: float = 2.5
-    navigation_timeout: int = 60_000  # ms
-    element_timeout: int = 60_000  # ms
+    navigation_timeout: int = 30_000  # ms
+    element_timeout: int = 30_000  # ms
 
     # Stealth
     user_agents: tuple[str, ...] = (

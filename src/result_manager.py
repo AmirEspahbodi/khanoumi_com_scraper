@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import io
 import json
 import logging
-import os
 import re
-import secrets
+import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
+from PIL import Image
 from playwright.async_api import Page
 
 from src.config import CFG
@@ -18,24 +19,16 @@ from src.data import ProductData
 
 logger = logging.getLogger("result_manager")
 
-# Content-Type → file extension mapping
-_CONTENT_TYPE_EXT: dict[str, str] = {
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-    "image/svg+xml": ".svg",
-    "image/bmp": ".bmp",
-    "image/tiff": ".tiff",
-}
-
 # Characters forbidden in Windows path components, plus ASCII control chars
 _FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _MULTI_HYPHEN = re.compile(r"-{2,}")
 
+# PNG compression level: 0 = no compression (largest file, original quality preserved).
+# PNG is always lossless; level only affects file size vs. encode speed.
+_PNG_COMPRESS_LEVEL = 0
 
-def _sanitize_folder_name(name: str, max_len: int = 50) -> str:
+
+def _sanitize_folder_name(name: str) -> str:
     """
     Produce a Windows-safe directory name component from *name*.
 
@@ -43,12 +36,12 @@ def _sanitize_folder_name(name: str, max_len: int = 50) -> str:
       characters (0x00–0x1F) with a hyphen.
     - Collapses runs of hyphens into a single hyphen.
     - Strips leading/trailing whitespace and dots.
-    - Truncates to max_len characters to avoid MAX_PATH issues.
+    - Truncates to 120 characters.
     """
     result = _FORBIDDEN.sub("-", name)
     result = _MULTI_HYPHEN.sub("-", result)
     result = result.strip(" .")
-    return result[:max_len]
+    return result[:120]
 
 
 def _extract_product_slug(url: str) -> str:
@@ -66,16 +59,48 @@ def _extract_product_slug(url: str) -> str:
         return "unknown-product"
 
 
-def _make_uid10() -> str:
+def _new_uuid() -> str:
+    """Return a new random UUID4 string (e.g. '3d6f4e2a-…')."""
+    return str(uuid.uuid4())
+
+
+def _to_png_bytes(raw: bytes) -> bytes:
     """
-    Return exactly 10 alphanumeric characters ([A-Za-z0-9]) drawn from
-    secrets.token_urlsafe, retrying until enough characters are available.
+    Convert *raw* image bytes (any Pillow-supported format) to PNG bytes at
+    maximum quality (compress_level=0, lossless).
+
+    Colour-mode handling:
+      • Palette (P) / Palette+Transparency (PA) → RGBA  (preserves transparency)
+      • All other modes with alpha (e.g. LA, RGBA)  → RGBA
+      • Everything else                              → RGB
+
+    Returns the original *raw* bytes unchanged if Pillow cannot open them,
+    so the caller always gets *something* to write to disk.
     """
-    chars: list[str] = []
-    while len(chars) < 10:
-        token = secrets.token_urlsafe(16)
-        chars.extend(c for c in token if c.isalnum())
-    return "".join(chars[:10])
+    try:
+        img = Image.open(io.BytesIO(raw))
+
+        # Normalise palette images first so conversions below are clean.
+        if img.mode in ("P", "PA"):
+            img = img.convert("RGBA")
+
+        # Keep alpha channel when present; otherwise use plain RGB.
+        if img.mode in ("RGBA", "LA"):
+            target_mode = "RGBA"
+        else:
+            target_mode = "RGB"
+
+        if img.mode != target_mode:
+            img = img.convert(target_mode)
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", compress_level=_PNG_COMPRESS_LEVEL)
+        return buf.getvalue()
+    except Exception as exc:
+        logger.warning(
+            "_to_png_bytes: Pillow conversion failed (%s) — saving raw bytes.", exc
+        )
+        return raw
 
 
 class ResultManager:
@@ -141,46 +166,17 @@ class ResultManager:
     # Image download
     # ------------------------------------------------------------------
 
-    def __extract_image_filename(self, url: str) -> str:
-        """
-        Extracts the base filename from either a Next.js encoded URL or a direct image URL.
-        """
-        try:
-            parsed_url = urlparse(url)
-            query_params = parse_qs(parsed_url.query)
-
-            if "url" in query_params:
-                target_url = query_params["url"][0]
-                target_path = urlparse(target_url).path
-            else:
-                target_path = parsed_url.path
-
-            target_path = unquote(target_path)
-
-            # Use split to safely grab the base name regardless of OS
-            base_name = target_path.split("/")[-1]
-
-            # Remove extension to avoid mid-string dots
-            base_name_no_ext, _ = os.path.splitext(base_name)
-
-            # Sanitize to prevent illegal chars and restrict length
-            safe_base = _sanitize_folder_name(base_name_no_ext, max_len=40)
-
-            # Fallback if empty
-            if not safe_base:
-                safe_base = "img"
-
-            return f"{safe_base}__"
-
-        except Exception as e:
-            logger.warning("Error parsing URL %s: %s", url, e)
-            return "img__"
-
     async def download_images(self, product: ProductData, page: Page) -> None:
         """
         Download all images referenced by *product* using the page's
-        authenticated request context. Appends bare image IDs (no extension)
-        to product.image_ids on success; logs warnings and continues on failure.
+        authenticated request context.
+
+        Each image is:
+          • Fetched from the network.
+          • Converted to PNG at maximum (lossless) quality via Pillow.
+          • Saved as ``<uuid4>.png`` inside the product directory.
+
+        The UUID (without extension) is appended to ``product.image_ids``.
         """
         # --- DO NOT download images for failed products ---
         if product.is_failed:
@@ -200,9 +196,7 @@ class ResultManager:
 
         # Assign product_id here so the directory is known before saving images.
         if not product.product_id:
-            slug = _sanitize_folder_name(_extract_product_slug(product.url))
-            uid = _make_uid10()
-            product.product_id = f"{slug}__{uid}"
+            product.product_id = _new_uuid()
 
         query_dir = _sanitize_folder_name(product.query_name) or "unknown-query"
         product_dir = Path("result") / query_dir / product.product_id
@@ -222,8 +216,6 @@ class ResultManager:
         if not urls:
             return
 
-        url_to_id: dict[str, str] = {}
-
         for image_url in urls:
             # Relative URL guard
             if not image_url.startswith("http"):
@@ -231,7 +223,7 @@ class ResultManager:
 
             max_retries = 3
             success = False
-            last_exc = None
+            last_exc: Optional[Exception] = None
 
             for attempt in range(max_retries):
                 try:
@@ -249,30 +241,15 @@ class ResultManager:
                         await asyncio.sleep(2.0)
                         continue
 
-                    content_type = (
-                        response.headers.get("content-type", "")
-                        .split(";")[0]
-                        .strip()
-                        .lower()
-                    )
-                    ext = _CONTENT_TYPE_EXT.get(content_type, "")
+                    # ── Convert to PNG (lossless, max quality) ───────────
+                    png_bytes = await asyncio.to_thread(_to_png_bytes, body)
 
-                    if not ext:
-                        url_path = urlparse(image_url).path
-                        suffix = Path(url_path).suffix.lower()
-                        if suffix and len(suffix) <= 5:
-                            ext = suffix
+                    # ── Assign a UUID filename ────────────────────────────
+                    image_id = _new_uuid()
+                    file_path = product_dir / f"{image_id}.png"
 
-                    if not ext:
-                        ext = ".jpg"
+                    await asyncio.to_thread(file_path.write_bytes, png_bytes)
 
-                    # Replaced secrets.token_hex(25) with 8 to prevent MAX_PATH overload
-                    image_id = f"{self.__extract_image_filename(image_url)}{secrets.token_hex(8)}"
-                    file_path = product_dir / f"{image_id}{ext}"
-
-                    await asyncio.to_thread(file_path.write_bytes, body)
-
-                    url_to_id[image_url] = image_id
                     product.image_ids.append(image_id)
 
                     success = True
@@ -299,26 +276,26 @@ class ResultManager:
 
     async def save_product(self, product: ProductData) -> None:
         """
-        Assign a product_id (if not already set), serialise *product* to JSON,
-        and write it atomically to disk.
-        Failed products are routed to 'result/failed-product/{slug}_{uid10}.json'.
-        Success products route to 'result/{query_name}/{product_id}/metadata.json'.
+        Assign a UUID product_id (if not already set), serialise *product* to
+        JSON, and write it atomically to disk.
+
+        Failed products  → ``result/failed-product/<uuid4>.json``
+        Success products → ``result/<query>/<product_uuid>/metadata.json``
+
         Also marks the product's URL as scraped.
         """
-        slug = _sanitize_folder_name(_extract_product_slug(product.url))
-        uid = _make_uid10()
-
         if product.is_failed:
             # ── Failed Product Routing ───────────────────────────────────
             failed_dir = Path("result") / "failed-product"
             failed_dir.mkdir(parents=True, exist_ok=True)
 
-            target_path = failed_dir / f"{slug}_{uid}.json"
+            fail_id = _new_uuid()
+            target_path = failed_dir / f"{fail_id}.json"
         else:
             # ── Success Product Routing ──────────────────────────────────
             # Only assign product_id if download_images hasn't done so already.
             if not product.product_id:
-                product.product_id = f"{slug}__{uid}"
+                product.product_id = _new_uuid()
 
             query_dir = _sanitize_folder_name(product.query_name) or "unknown-query"
             product_dir = Path("result") / query_dir / product.product_id
@@ -337,7 +314,7 @@ class ResultManager:
         logger.info(
             "Saved %s product: %s → %s",
             status_flag,
-            product.product_id or f"{slug}_{uid}",
+            product.product_id or target_path.stem,
             target_path,
         )
 

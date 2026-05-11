@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
+from itertools import count
 from typing import Optional
 
 from src.browser_manager import BrowserManager
-from src.config import CFG
+from src.config import CFG, get_search_queries
 from src.helpers import (
     detect_bot_challenge,
     human_delay,
@@ -29,14 +29,26 @@ async def producer(
     Collects all product URLs, deduplicates them (both in-session and against
     previously scraped runs), and pushes them into the queue.
 
+    Search queries are loaded from ``Book1.xlsx`` (column B) at runtime.
+
     Returns the total number of unique URLs queued this session.
     """
     website_url = CFG.base_url
     seen_urls: set[str] = set()
 
-    logger.info("Producer starting — base search URL: %s", website_url)
+    # ── Load queries from the workbook ───────────────────────────────────
+    search_queries = get_search_queries()
+    if not search_queries:
+        logger.error("Producer: no search queries loaded — aborting.")
+        return 0
 
-    for query in CFG.search_queries:
+    logger.info(
+        "Producer starting — base URL: %s | %d queries loaded.",
+        website_url,
+        len(search_queries),
+    )
+
+    for query in search_queries:
         logger.info("Starting search for query: '%s'", query)
         page_num = 1
 
@@ -56,29 +68,16 @@ async def producer(
             search_button_locator = page.locator(CFG.search_input_xpath).first
             await search_button_locator.press("Enter")
             await human_delay(1.0, 2.0)
-            if (
-                await page.locator(
-                    "//a[@aria-label='Page 1 is your current page']"
-                ).count()
-                == 0
-            ):
-                page1 = page.locator("//a[@aria-label='Page 1']")
+            page1 = page.locator("//a[@aria-label='Page 1']")
+            if await page1.count() != 0:
                 await page1.click()
-            await human_delay(2.0, 3.0)
+                await human_delay(2.0, 3.0)
             await page.evaluate("document.body.style.zoom = '25%'")
 
             while True:
                 await human_delay(4.0, 5.0)
                 logger.info(
                     "Producer scraping page %d for query '%s' …", page_num, query
-                )
-
-                # await page.evaluate("document.body.style.zoom = '25%'")
-                # await human_delay(4.0, 5.0)
-
-                await page.wait_for_selector(
-                    CFG.one_product_xpath,
-                    timeout=CFG.element_timeout,
                 )
 
                 product_links = []
@@ -101,9 +100,6 @@ async def producer(
                         product_links.append(f"{CFG.base_url}{href[1:]}")
                 if not product_links:
                     break
-
-                # await page.evaluate("document.body.style.zoom = '100%'")
-                # await human_delay(1.0, 2.0)
 
                 # Deduplicate against all previously seen URLs across all queries (in-session)
                 new_urls = [u for u in product_links if u not in seen_urls]
