@@ -49,8 +49,8 @@ class ScraperConfig:
     # Timing (seconds)
     min_delay: float = 0.8
     max_delay: float = 2.5
-    navigation_timeout: int = 30_000  # ms
-    element_timeout: int = 30_000  # ms
+    navigation_timeout: int = 60_000  # ms
+    element_timeout: int = 60_000  # ms
 
     # Stealth
     user_agents: tuple[str, ...] = (

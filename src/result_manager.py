@@ -35,7 +35,7 @@ _FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _MULTI_HYPHEN = re.compile(r"-{2,}")
 
 
-def _sanitize_folder_name(name: str) -> str:
+def _sanitize_folder_name(name: str, max_len: int = 50) -> str:
     """
     Produce a Windows-safe directory name component from *name*.
 
@@ -43,12 +43,12 @@ def _sanitize_folder_name(name: str) -> str:
       characters (0x00–0x1F) with a hyphen.
     - Collapses runs of hyphens into a single hyphen.
     - Strips leading/trailing whitespace and dots.
-    - Truncates to 120 characters.
+    - Truncates to max_len characters to avoid MAX_PATH issues.
     """
     result = _FORBIDDEN.sub("-", name)
     result = _MULTI_HYPHEN.sub("-", result)
     result = result.strip(" .")
-    return result[:120]
+    return result[:max_len]
 
 
 def _extract_product_slug(url: str) -> str:
@@ -156,11 +156,25 @@ class ResultManager:
                 target_path = parsed_url.path
 
             target_path = unquote(target_path)
-            return f"{os.path.basename(target_path).replace('.', '_')}__"
+
+            # Use split to safely grab the base name regardless of OS
+            base_name = target_path.split("/")[-1]
+
+            # Remove extension to avoid mid-string dots
+            base_name_no_ext, _ = os.path.splitext(base_name)
+
+            # Sanitize to prevent illegal chars and restrict length
+            safe_base = _sanitize_folder_name(base_name_no_ext, max_len=40)
+
+            # Fallback if empty
+            if not safe_base:
+                safe_base = "img"
+
+            return f"{safe_base}__"
 
         except Exception as e:
-            logger.warning(f"Error parsing URL: {e}")
-            return ""
+            logger.warning("Error parsing URL %s: %s", url, e)
+            return "img__"
 
     async def download_images(self, product: ProductData, page: Page) -> None:
         """
@@ -252,7 +266,8 @@ class ResultManager:
                     if not ext:
                         ext = ".jpg"
 
-                    image_id = f"{self.__extract_image_filename(image_url)}{secrets.token_hex(25)}"
+                    # Replaced secrets.token_hex(25) with 8 to prevent MAX_PATH overload
+                    image_id = f"{self.__extract_image_filename(image_url)}{secrets.token_hex(8)}"
                     file_path = product_dir / f"{image_id}{ext}"
 
                     await asyncio.to_thread(file_path.write_bytes, body)

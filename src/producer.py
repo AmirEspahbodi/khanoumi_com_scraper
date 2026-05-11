@@ -56,8 +56,14 @@ async def producer(
             search_button_locator = page.locator(CFG.search_input_xpath).first
             await search_button_locator.press("Enter")
             await human_delay(1.0, 2.0)
-            page1 = page.locator("//a[@aria-label='Page 1']")
-            await page1.click()
+            if (
+                await page.locator(
+                    "//a[@aria-label='Page 1 is your current page']"
+                ).count()
+                == 0
+            ):
+                page1 = page.locator("//a[@aria-label='Page 1']")
+                await page1.click()
             await human_delay(2.0, 3.0)
             await page.evaluate("document.body.style.zoom = '25%'")
 
