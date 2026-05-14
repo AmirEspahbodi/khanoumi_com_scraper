@@ -9,7 +9,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 from PIL import Image
 from playwright.async_api import Page
@@ -177,6 +177,8 @@ class ResultManager:
           • Saved as ``<uuid4>.png`` inside the product directory.
 
         The UUID (without extension) is appended to ``product.image_ids``.
+
+        Images are saved to: result/<product_uuid>/
         """
         # --- DO NOT download images for failed products ---
         if product.is_failed:
@@ -198,8 +200,8 @@ class ResultManager:
         if not product.product_id:
             product.product_id = _new_uuid()
 
-        query_dir = _sanitize_folder_name(product.query_name) or "unknown-query"
-        product_dir = Path("result") / query_dir / product.product_id
+        # Flat layout: result/<product_uuid>/
+        product_dir = Path("result") / product.product_id
         product_dir.mkdir(parents=True, exist_ok=True)
 
         # Build deduplicated, ordered list of image URLs (main first, then thumbnails)
@@ -280,7 +282,7 @@ class ResultManager:
         JSON, and write it atomically to disk.
 
         Failed products  → ``result/failed-product/<uuid4>.json``
-        Success products → ``result/<query>/<product_uuid>/metadata.json``
+        Success products → ``result/<product_uuid>/metadata.json``
 
         Also marks the product's URL as scraped.
         """
@@ -293,12 +295,12 @@ class ResultManager:
             target_path = failed_dir / f"{fail_id}.json"
         else:
             # ── Success Product Routing ──────────────────────────────────
+            # Flat layout: result/<product_uuid>/metadata.json
             # Only assign product_id if download_images hasn't done so already.
             if not product.product_id:
                 product.product_id = _new_uuid()
 
-            query_dir = _sanitize_folder_name(product.query_name) or "unknown-query"
-            product_dir = Path("result") / query_dir / product.product_id
+            product_dir = Path("result") / product.product_id
             product_dir.mkdir(parents=True, exist_ok=True)
 
             target_path = product_dir / "metadata.json"

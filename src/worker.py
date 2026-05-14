@@ -19,6 +19,7 @@ from src.helpers import (
     human_delay,
     mouse_jitter,
 )
+from src.producer_store import update_entry_scraped
 from src.result_manager import ResultManager
 
 logger = logging.getLogger("scrape_product")
@@ -50,9 +51,9 @@ def _upscale_img_url(src: str, width: int = 800) -> str:
 def _clean_block(raw: str) -> str:
     """
     Normalise a single h2/h3/p text block:
-      • \xa0 (non-breaking space) → regular space
+      • \\xa0 (non-breaking space) → regular space
       • bullet chars (·  •  ·) stripped
-      • internal \n / \r / \t collapsed to single space
+      • internal \\n / \\r / \\t collapsed to single space
       • runs of spaces collapsed
       • leading/trailing whitespace stripped
     """
@@ -300,8 +301,9 @@ async def worker(
 ) -> None:
     """
     Consumer coroutine.
-    Pulls URLs from the queue, scrapes each with retries + exponential back-off,
-    and appends results to the shared list.
+    Pulls (url, query_name) tuples from the queue, scrapes each with retries
+    + exponential back-off, saves results, and updates producer.json via
+    update_entry_scraped() after each successful product.
     """
     log = logging.getLogger(f"worker-{worker_id:02d}")
     log.info("Started.")
@@ -319,6 +321,7 @@ async def worker(
 
         product: Optional[ProductData] = None
         last_exc: Optional[Exception] = None
+        scraped_ok: bool = False
 
         for attempt in range(1, CFG.max_retries + 1):
             try:
@@ -335,6 +338,17 @@ async def worker(
                 # Tab is auto-closed by the context manager; save product after close
                 await result_manager.save_product(product)
 
+                # ── Update producer.json for successfully scraped products ──
+                if not product.is_failed and product.product_id:
+                    scrap_dir = f"result/{product.product_id}"
+                    try:
+                        await update_entry_scraped(url, scrap_dir)
+                    except Exception as upd_exc:
+                        log.warning(
+                            "update_entry_scraped failed for %s: %s", url, upd_exc
+                        )
+
+                scraped_ok = True
                 log.info(
                     "OK  %-60s | %-40s | %s",
                     url[-60:],
@@ -378,14 +392,15 @@ async def worker(
                 )
                 await asyncio.sleep(CFG.backoff_base**attempt)
 
-        if product is None:
+        if not scraped_ok:
             log.error(
                 "FAILED after %d attempts: %s", CFG.max_retries, url, exc_info=last_exc
             )
             product = ProductData(url=url, query_name=query_name, error=str(last_exc))
             await result_manager.save_product(product)
 
-        results.append(product)
+        if product is not None:
+            results.append(product)
         queue.task_done()
 
     log.info("Worker exiting.")
