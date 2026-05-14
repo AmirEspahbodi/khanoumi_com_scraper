@@ -9,6 +9,8 @@ class ProductData:
     name_fa: str = ""
     name_en: str = ""
     product_id: str = ""
+    brand: str = ""
+    category: str = ""
 
     rate: Optional[float] = None
     review_count: Optional[int] = None

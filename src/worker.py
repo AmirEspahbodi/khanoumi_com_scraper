@@ -24,13 +24,15 @@ from src.result_manager import ResultManager
 
 logger = logging.getLogger("scrape_product")
 
-_INTRO_BTN_XPATH = "//html/body/section/main/div/div[1]/div[4]/div[1]/button"
-_INTRO_PANEL_XPATH = "//html/body/section/main/div/div[1]/div[4]/div[1]/div/div"
+_INTRO_BTN_CSS = 'span > svg[data-sentry-component="SvgArrowSquareDown"]'
+_INTRO_PANEL_XPATH = '//div[@data-sentry-component="Description"]//div[@data-test="pdp-description"]//div[@data-sentry-element="Component"]'
 
 # HeadlessUI generates :rN: IDs deterministically per render but they can
 # shift if the component tree changes, so we keep a text-based fallback.
-_USAGE_BTN_ID = "headlessui-disclosure-button-:r6:"
-_USAGE_PANEL_ID = "headlessui-disclosure-panel-:r7:"
+_HowToUseButton = '//div[@data-sentry-component="HowToUse"]//button'
+_HowToUseComponent = (
+    '//div[@data-sentry-component="HowToUse"]//div[@data-sentry-element="Component"]'
+)
 
 
 def _parse_price(raw: str) -> Optional[int]:
@@ -107,10 +109,22 @@ async def scrape_product(page: Page, url: str) -> ProductData:
         root = page.locator("//html/body/div[2]/section/main/div/div[1]/div[2]")
         await root.wait_for(state="visible", timeout=15_000)
 
-        # ── 1. Names ──────────────────────────────────────────────────────────
+        # ── 1. Names, Brand, Category ──────────────────────────────────────────────────────────
         h1 = root.locator("h1").first
         if await h1.count():
             product.name_fa = (await h1.inner_text()).strip()
+
+        brand = root.locator(
+            "(//div[@data-sentry-component='PDPBreadcrumb']//a)[1]"
+        ).first
+        if await brand.count():
+            product.brand = (await brand.inner_text()).strip()
+
+        category = root.locator(
+            "(//div[@data-sentry-component='PDPBreadcrumb']//a)[last()]"
+        ).first
+        if await category.count():
+            product.category = (await category.inner_text()).strip()
 
         # The English name is in a <span> that is hidden on mobile / shown on lg.
         # It sits directly below h1 inside the same mb-3 flex column.
@@ -235,15 +249,19 @@ async def scrape_product(page: Page, url: str) -> ProductData:
                 await human_delay(0.2, 0.5)  # brief settle for lazy-loaded siblings
                 product.image_urls[colour_label] = await _collect_gallery()
 
+        # ── 8.  Zoom to 25 % — forces lazy content into viewport ─────────────
+        await page.evaluate("document.body.style.zoom = '0.25'")
+        await page.wait_for_timeout(random.randint(3_000, 4_000))
+
         # ── 6.  Expand  "معرفی محصول"  ──────────────────────────────────────
-        intro_btn = page.locator(f"xpath={_INTRO_BTN_XPATH}")
+        intro_btn = page.locator(_INTRO_BTN_CSS)
         clicked_intro = await _safe_click(intro_btn)
         if clicked_intro:
             await human_delay(0.3, 0.6)
 
         # ── 7.  Expand  "نحوه مصرف"  ────────────────────────────────────────
         # Primary: stable HeadlessUI ID supplied by the site.
-        usage_btn = page.locator(f'xpath=//*[@id="{_USAGE_BTN_ID}"]')
+        usage_btn = page.locator(_HowToUseButton)
         if not await usage_btn.count():
             # Fallback: find any <button> whose visible text contains the label.
             # This survives ID shifts when component order changes.
@@ -253,18 +271,14 @@ async def scrape_product(page: Page, url: str) -> ProductData:
         if clicked_usage:
             await human_delay(0.3, 0.6)
 
-        # ── 8.  Zoom to 25 % — forces lazy content into viewport ─────────────
-        await page.evaluate("document.body.style.zoom = '0.25'")
-        await page.wait_for_timeout(random.randint(2_000, 3_000))
-
         # ── 9.  Extract  "معرفی محصول"  ──────────────────────────────────────
-        intro_panel = page.locator(f"xpath={_INTRO_PANEL_XPATH}")
+        intro_panel = page.locator(_INTRO_PANEL_XPATH)
         if await intro_panel.count():
             product.product_intro = await _extract_text_blocks(intro_panel)
 
         # ── 10. Extract  "نحوه مصرف"  ─────────────────────────────────────────
         # Primary: stable panel ID.
-        usage_panel = page.locator(f'xpath=//*[@id="{_USAGE_PANEL_ID}"]')
+        usage_panel = page.locator(_HowToUseComponent)
         if not await usage_panel.count():
             # Fallback: grab the last disclosure panel currently marked as open.
             usage_panel = page.locator('[data-headlessui-state~="open"]').last
