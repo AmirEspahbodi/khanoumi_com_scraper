@@ -1,4 +1,6 @@
 playwright==1.59.0
 playwright-stealth==2.0.3
-pydantic==2.13.3
+pydantic==2.13.4
 pillow==12.2.0
+RapidFuzz==3.14.5
+hazm==0.10.0
