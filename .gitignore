@@ -178,3 +178,4 @@ result/
 *.xlsx
 *.tmp
 *.json
+**/brands.txt
