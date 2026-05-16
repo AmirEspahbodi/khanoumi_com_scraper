@@ -178,4 +178,5 @@ result/
 *.xlsx
 *.tmp
 *.json
-**/brands.txt
+brands.txt
+brands.txt

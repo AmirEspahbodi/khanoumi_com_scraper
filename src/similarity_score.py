@@ -26,6 +26,8 @@ Dependencies (non-stdlib):
 from __future__ import annotations
 
 import functools
+import json
+import pathlib
 import re
 import unicodedata
 from collections import Counter
@@ -544,6 +546,75 @@ _COMPOUND_DICT: dict[tuple[str, ...], tuple[str, str]] = {
     ("jean", "paul", "gaultier"): ("jean_paul_gaultier", "brand"),
     ("yves", "saint", "laurent"): ("ysl", "brand"),
 }
+
+
+# ─── 1.6b  Brand JSON Loader ──────────────────────────────────────────────
+#
+# brands.json is produced by build_brands_json.py from the raw brands.txt
+# catalogue.  It is loaded ONCE at module-import time (not on every call)
+# and merged into _TRANS_DICT / _COMPOUND_DICT without overwriting the
+# curated entries above.
+#
+# JSON schema:
+#   {
+#     "trans_dict":   { "<normalised_token>": ["<canonical>", "brand"] },
+#     "compound_dict": { "<tok1>,<tok2>": ["<compound_canonical>", "brand"] }
+#   }
+#
+# Lookup key for the file: same directory as this module file.  If the JSON
+# is absent (e.g. first-run before build_brands_json.py has been executed),
+# loading is silently skipped so the engine degrades gracefully.
+
+def _load_brands_json(json_path: Optional[str] = None) -> None:
+    """
+    Read brands.json and merge new brand entries into _TRANS_DICT and
+    _COMPOUND_DICT.  Existing entries are never overwritten; curated hand-
+    tuned mappings always take priority.
+
+    This function is called exactly once, immediately below its definition,
+    at module-import time.  It must never be called from inside similarity_score()
+    or any other hot-path function.
+
+    Args:
+        json_path: explicit path override (used in tests).  When None the
+                   file is expected next to this module: ``<module_dir>/brands.json``.
+    """
+    if json_path is None:
+        resolved: pathlib.Path = pathlib.Path(__file__).parent.with_name("brands.json")
+    else:
+        resolved = pathlib.Path(json_path)
+    print(f"brands.txt = {resolved.absolute()}")
+
+    if not resolved.exists():
+        # Graceful degradation: no json → engine still works with built-in entries.
+        return
+
+    try:
+        with resolved.open(encoding="utf-8") as _fh:
+            _data: dict = json.load(_fh)
+    except (json.JSONDecodeError, OSError):
+        # Corrupted or unreadable file → skip silently.
+        print("Corrupted or unreadable file → skip silently")
+        return
+
+    # ── Merge trans_dict entries ───────────────────────────────────────────
+    for _tok, _entry in _data.get("trans_dict", {}).items():
+        if isinstance(_entry, (list, tuple)) and len(_entry) == 2:
+            # setdefault guarantees existing curated entries are never touched
+            _TRANS_DICT.setdefault(_tok, (str(_entry[0]), str(_entry[1])))
+
+    # ── Merge compound_dict entries ────────────────────────────────────────
+    for _key_str, _entry in _data.get("compound_dict", {}).items():
+        if isinstance(_entry, (list, tuple)) and len(_entry) == 2:
+            # Compound keys are comma-joined token tuples
+            _key: tuple[str, ...] = tuple(_key_str.split(","))
+            _COMPOUND_DICT.setdefault(_key, (str(_entry[0]), str(_entry[1])))
+    
+    print("brands.json is loaded")
+
+
+# Execute once at import time — zero runtime overhead on repeated similarity_score() calls.
+_load_brands_json()
 
 
 # ─── 1.7  Token Class Weights ─────────────────────────────────────────────
