@@ -7,6 +7,8 @@ from typing import Any
 from playwright.async_api import Locator
 
 from src.browser_manager import BrowserManager
+from src.similarity_score_gpt5 import similarity_score as similarity_score_gpt5
+from src.similarity_score import similarity_score as similarity_score_claude
 from src.config import CFG, get_search_queries
 from src.helpers import (
     detect_bot_challenge,
@@ -38,17 +40,6 @@ async def get_product_name(card_locator: Locator) -> str:
         return text.strip()
     except Exception:
         return ""
-
-
-def similarity_score(search_query: str, product_name: str) -> float:
-    """
-    Stub similarity scorer.
-
-    Returns a random float in (0, 1).  The real implementation (using e.g.
-    RapidFuzz / hazm token matching) will be swapped in without changing the
-    signature: (search_query: str, product_name: str) -> float.
-    """
-    return random.uniform(0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +87,7 @@ async def producer(manager: BrowserManager) -> int:
     for query in search_queries:
         logger.info("Starting search for query: '%s'", query)
         page_num = 1
+        is_product_found = False
 
         async with manager.new_page() as page:
             page.set_default_timeout(CFG.navigation_timeout)
@@ -169,34 +161,42 @@ async def producer(manager: BrowserManager) -> int:
 
                     # Extract product name and compute similarity score
                     name = await get_product_name(card)
-                    score = similarity_score(query, name)
+                    score1 = similarity_score_claude(query, name)
+                    score2 = similarity_score_gpt5(query, name)
 
                     # Only persist entries with a positive score
-                    if score < 0.95:
-                        logger.debug(
-                            "Skipping low-score product (%.4f): %s", score, product_url
+                    if score1 < 0.80 and score2 < 0.80:
+                        logger.info(
+                            "Skipping low-score product (%.4f), (%.4f): query = %s _ name = %s", score1, score2, query, name
                         )
                         continue
 
                     entry: dict[str, Any] = {
                         "search_query": query,
                         "product_url": product_url,
-                        "similarity_score": score,
+                        "similarity_score1": score1,
+                        "similarity_score2": score2,
                         "is_scraped": False,
                         "scrap_directory": "",
                     }
 
                     # Real-time persistence: write after every single product
                     await append_entry(entry)
+                    is_product_found=True
                     new_entries_written += 1
                     page_new += 1
 
                     logger.debug(
-                        "Appended entry #%d — score=%.4f url=%s",
+                        "Appended entry #%d — score=%.4f,%.4f url=%s",
                         new_entries_written,
-                        score,
+                        score1,
+                        score2,
                         product_url,
                     )
+                    if is_product_found:
+                        break
+                if is_product_found:
+                    break
 
                 logger.info(
                     "  Page %d → %d new entries written (running total: %d).",
@@ -225,6 +225,10 @@ async def producer(manager: BrowserManager) -> int:
                 await page.wait_for_load_state("domcontentloaded")
                 await detect_bot_challenge(page)
                 page_num += 1
+    if is_product_found:
+        pass
+    else:
+        pass
 
     logger.info(
         "Producer finished — %d new entries written to producer.json.",

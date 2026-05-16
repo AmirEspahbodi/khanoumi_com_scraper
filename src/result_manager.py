@@ -25,7 +25,7 @@ _MULTI_HYPHEN = re.compile(r"-{2,}")
 
 # PNG compression level: 0 = no compression (largest file, original quality preserved).
 # PNG is always lossless; level only affects file size vs. encode speed.
-_PNG_COMPRESS_LEVEL = 0
+_PNG_COMPRESS_LEVEL = 1
 
 
 def _sanitize_folder_name(name: str) -> str:

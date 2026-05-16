@@ -33,11 +33,11 @@ def get_search_queries(path: str = "Book1.xlsx") -> tuple[str, ...]:
     ws = wb.active
     queries: list[str] = []
     counter = 0
-    for row in ws.iter_rows(min_col=2, max_col=2, values_only=True):
+    for row in ws.iter_rows(min_col=0, max_col=3, values_only=True):
         if counter == 0:
             counter += 1
             continue
-        val = row[0]
+        val = row[2]
         if val is not None and str(val).strip():
             queries.append(str(val).strip())
     wb.close()
