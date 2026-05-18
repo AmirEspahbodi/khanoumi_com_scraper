@@ -12,7 +12,7 @@ logger = logging.getLogger("scraper")
 # ---------------------------------------------------------------------------
 
 
-def get_search_queries(path: str = "Book1.xlsx") -> tuple[str, ...]:
+def get_search_data(path: str = "Book1.xlsx") -> tuple[tuple[str], ...]:
     """
     Read search queries from the *second column* of every row in *path*.
     Blank / whitespace-only cells are silently skipped.
@@ -31,24 +31,22 @@ def get_search_queries(path: str = "Book1.xlsx") -> tuple[str, ...]:
 
     wb = load_workbook(xlsx_path, read_only=True, data_only=True)
     ws = wb.active
-    queries: list[str] = []
+    data: list[tuple[str]] = []
     counter = 0
-    for row in ws.iter_rows(min_col=0, max_col=3, values_only=True):
+    for row in ws.iter_rows(min_col=0, max_col=6, values_only=True):
         if counter == 0:
             counter += 1
             continue
-        val = row[2]
-        if val is not None and str(val).strip():
-            queries.append(str(val).strip())
+        if row[5] is None or str(row[5]).strip().lower() in ["", "nan"]:
+            continue
+        data.append((row[2], row[3], row[4], row[5]))
     wb.close()
 
-    if not queries:
-        logger.warning(
-            "get_search_queries: no queries found in column B of '%s'.", path
-        )
+    if not data:
+        logger.warning("get_search_data: no queries found in column B of '%s'.", path)
 
-    logger.info("get_search_queries: loaded %d queries from '%s'.", len(queries), path)
-    return tuple(queries)
+    logger.info("get_search_data: loaded %d queries from '%s'.", len(data), path)
+    return tuple(data)
 
 
 # ---------------------------------------------------------------------------

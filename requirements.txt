@@ -5,3 +5,5 @@ pillow==12.2.0
 RapidFuzz==3.14.5
 hazm==0.10.0
 openpyxl==3.1.5
+python-dotenv
+google-genai
