@@ -88,83 +88,81 @@ except ValueError as e:
 
 def normalize_query(raw_query: str) -> NormalizedResult | None:
     prompt = f"""# System Role
-You are an expert Data Normalizer and SEO Specialist in the cosmetics and beauty industry. Your exact task is to take messy, human-written cosmetic product names from an Excel file and convert them into one optimized search query and five specifically structured, normalized product names.
+You are an expert Data Normalizer and SEO Specialist in the cosmetics and beauty industry. Your exact task is to take messy, human-written cosmetic product names and convert them into highly optimized search queries and exactly 5 structured, normalized product names.
 
 # Objective
 For the provided raw product name, you must generate a JSON response exactly matching this schema:
 {{
-"normalized_search_query": "string",
-"normalized_product_name1": "string",
-"normalized_product_name2": "string",
-"normalized_product_name3": "string",
-"normalized_product_name4": "string",
-"normalized_product_name5": "string"
-}}
+    "normalized_search_query": "string",
+    "normalized_product_name1": "string",
+    "normalized_product_name2": "string",
+    "normalized_product_name3": "string",
+    "normalized_product_name4": "string",
+    "normalized_product_name5": "string"
+    }}
 
-# Strict Rules for "normalized_search_query":
+# 🚫 ABSOLUTE RED LINE (CRITICAL TO AVOID FALSE POSITIVES):
+- NO ADDITIONS: If the raw name DOES NOT contain a specific color, weight, volume, size, amount, or specific model, NONE of the 5 normalized names should have them. DO NOT guess, hallucinate, or add default values.
+- NO DELETIONS: If the raw name HAS a specific shade (e.g., NC41) or volume (e.g., 125m), it MUST be present in ALL 5 variations.
+
+# Rules for "normalized_search_query":
 - Broad enough to yield results, specific enough to filter out junk.
 - Include ONLY the Brand, Core Product Type, and Main Line/Model.
-- EXCLUDE highly specific details like exact volume (e.g., 100ml) or specific color codes (e.g., NC41, m010) to maximize search hits.
+- EXCLUDE highly specific details like exact volume (e.g., 100ml) or specific color codes (e.g., NC41, m010) because searching for the exact shade might yield zero results.
 
-# CRITICAL RULES FOR ALL "normalized_product_name" VARIATIONS (PREVENT FALSE POSITIVES):
-- ZERO HALLUCINATION: DO NOT ADD any information. If the raw name lacks a brand, model, size, or color, DO NOT add one.
-- NO DATA LOSS: DO NOT REMOVE any core information. Specific shades (e.g., NC41) or volumes (e.g., 125m) MUST be present in all 5 variations.
-- Fix all obvious typos in all variations.
-- Standardize volume/weight phrases to official Persian formats (e.g., "م" or "میل" becomes "میلی لیتر").
-
-# Specific Rules for the 5 Variations:
-- normalized_product_name1 (Standard Format): [Product Type] + [Brand (Persian)] + [Model/Feature] + [Code/Color] + [Volume (Standardized)]. Fix spacing.
-- normalized_product_name2 (Mixed/Brand-First): [Brand (Persian/English)] + [Product Type] + [Model/Code (Keep original English characters if applicable)].
-- normalized_product_name3 (Expanded/Cleaned): Reorder slightly to mimic formal catalog names. Keep all details.
-- normalized_product_name4 (All-Persian Standard E-commerce): Base format MUST be Standard E-commerce. ALL brands, categories, and Finglish terms MUST be translated/transliterated to Persian script (e.g., MAC -> مک, Full Lash -> فول لش). Volume/Weight standardized in Persian format.
-- normalized_product_name5 (English-Brand Standard E-commerce): Base text structure MUST be Persian (e.g., کرم پودر ... مدل ... حجم ...). ONLY Brands, Marks, and Finglish/Specific terms MUST be translated to English (e.g., مک -> MAC, فول لش -> Full Lash). Volume/Weight standardized in Persian format.
+# Rules for "normalized_product_name" Variations:
+- normalized_product_name1 (Standard Format): [Product Type] + [Brand] + [Model/Feature] + [Code/Color] + [Volume (Standardized)]. Fix spacing and typos.
+- normalized_product_name2 (Mixed Format): [Brand (Keep original)] + [Product Type] + [Model/Code].
+- normalized_product_name3 (Expanded/Cleaned): Expand abbreviations (e.g., "م" or "میل" to "میلی لیتر"). Reorder slightly to mimic formal catalog names.
+- normalized_product_name4 (Fully Persianized Standard E-commerce): Translate brand and category to Persian if possible. Convert any Finglish terms to Persian script. Normalize volume/weight to a standard Persian format (e.g., "میلی لیتر"). Fix spelling mistakes.
+- normalized_product_name5 (English Brand/Model Standard E-commerce): Keep the base text and volume/weight formatting in PERSIAN (e.g., "حجم ... میلی لیتر"). However, translate ONLY the Brand, Category (if applicable), and Finglish terms to pure ENGLISH. Example: "کرم پودر MAC مدل Studio Fix".
 
 # Output Format
 You must respond ONLY with a valid JSON object. Do not include markdown tags like ```json or any conversational text.
 
 # Examples
-Input: "مک کرم پودر استودیو فیکسNC41"
+Input: "مک کرم پودراستودیو فیکس NC 25"
 Output:
 {{
 "normalized_search_query": "کرم پودر مک استودیو فیکس",
-"normalized_product_name1": "کرم پودر مک مدل استودیو فیکس رنگ NC41",
-"normalized_product_name2": "مک کرم پودر Studio Fix شماره NC41",
-"normalized_product_name3": "کرم پودر مک استودیو فیکس NC41",
-"normalized_product_name4": "کرم پودر مک مدل استودیو فیکس رنگ ان سی 41",
-"normalized_product_name5": "کرم پودر MAC مدل Studio Fix رنگ NC41"
+"normalized_product_name1": "کرم پودر مک استودیو فیکس NC25",
+"normalized_product_name2": "مک کرم پودر Studio Fix NC25",
+"normalized_product_name3": "کرم پودر مک استودیو فیکس NC 25",
+"normalized_product_name4": "کرم پودر مک استودیو فیکس ان سی 25",
+"normalized_product_name5": "کرم پودر MAC Studio Fix NC25"
 }}
 
 Input: "لورال پرایمر تیوپی اینفالیبل 35 میل"
 Output:
 {{
 "normalized_search_query": "پرایمر تیوپی لورال اینفالیبل",
-"normalized_product_name1": "پرایمر تیوپی لورال مدل اینفالیبل حجم 35 میلی لیتر",
-"normalized_product_name2": "لورال پرایمر Infallible حجم 35 میل",
+"normalized_product_name1": "پرایمر تیوپی لورال اینفالیبل 35 میلی لیتر",
+"normalized_product_name2": "لورال پرایمر تیوپی اینفالیبل 35 میل",
 "normalized_product_name3": "پرایمر تیوپی لورال اینفالیبل 35 میلی لیتر",
-"normalized_product_name4": "پرایمر تیوپی لورآل مدل اینفالیبل حجم 35 میلی لیتر",
-"normalized_product_name5": "پرایمر تیوپی L'Oreal مدل Infallible حجم 35 میلی لیتر"
+"normalized_product_name4": "پرایمر تیوپی لورآل اینفالیبل 35 میلی لیتر",
+"normalized_product_name5": "پرایمر تیوپی Loreal Infallible 35 میلی لیتر"
 }}
 
 Input: "بل ریمل فول لش"
 Output:
 {{
 "normalized_search_query": "ریمل بل فول لش",
-"normalized_product_name1": "ریمل بل مدل فول لش",
-"normalized_product_name2": "بل ریمل Full Lash",
-"normalized_product_name3": "ریمل چشم بل فول لش",
-"normalized_product_name4": "ریمل بل مدل فول لش",
-"normalized_product_name5": "ریمل Bell مدل Full Lash"
+"normalized_product_name1": "ریمل بل فول لش",
+"normalized_product_name2": "بل ریمل فول لش",
+"normalized_product_name3": "ریمل بل فول لش",
+"normalized_product_name4": "ریمل بل فول لش",
+"normalized_product_name5": "ریمل Bell Full Lash"
 }}
 
 Input: "ادکلن دیویدوف کول واتر 125م"
 Output:
 {{
 "normalized_search_query": "ادکلن دیویدوف کول واتر",
-"normalized_product_name1": "ادکلن دیویدوف مدل کول واتر حجم 125 میلی لیتر",
-"normalized_product_name2": "دیویدوف ادکلن Cool Water حجم 125 میل",
+"normalized_product_name1": "ادکلن دیویدوف کول واتر 125 میلی لیتر",
+"normalized_product_name2": "دیویدوف ادکلن کول واتر 125m",
 "normalized_product_name3": "ادکلن دیویدوف کول واتر 125 میلی لیتر",
-"normalized_product_name4": "ادکلن دیویدوف مدل کول واتر حجم 125 میلی لیتر",
-"normalized_product_name5": "ادکلن Davidoff مدل Cool Water حجم 125 میلی لیتر"
+"normalized_product_name4": "ادکلن دیویدوف کول واتر 125 میلی لیتر",
+"normalized_product_name5": "ادکلن Davidoff Cool Water 125 میلی لیتر"
 }}
 
 # Real Task
