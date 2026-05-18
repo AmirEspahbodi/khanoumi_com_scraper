@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import random
 from cmath import log
+from pathlib import Path  # Added for state tracking
 from typing import Any
 
 from playwright.async_api import Locator
@@ -17,9 +18,9 @@ from src.helpers import (
     scroll_to_element,
 )
 from src.producer_store import append_entry, load_producer_json
-
-# from src.similarity_score_claude import similarity_score as similarity_score_claude
+from src.similarity_score_claude import similarity_score as similarity_score_claude
 from src.similarity_score_gemini import similarity_score as similarity_score_gemini
+from src.similarity_score_gemini2 import similarity_score as similarity_score_gemini2
 
 logger = logging.getLogger("producer")
 
@@ -55,6 +56,7 @@ async def producer(manager: BrowserManager) -> int:
     score each product card, and persist new entries to producer.json.
 
     Resume support: entries already present in producer.json are skipped.
+    Row resume support: successfully completed rows are tracked in producer_state.txt.
 
     Returns the total number of NEW entries written this session.
     """
@@ -82,18 +84,39 @@ async def producer(manager: BrowserManager) -> int:
         len(existing_urls),
     )
 
+    # ── Load State Tracker for Excel Rows ────────────────────────────────
+    state_file = Path("producer_state.txt")
+    processed_rows = set()
+    if state_file.exists():
+        processed_rows = set(state_file.read_text(encoding="utf-8").splitlines())
+        logger.info(
+            "Producer: loaded %d completed rows from state file. Resuming where left off...",
+            len(processed_rows),
+        )
+
     # In-session seen set (across all queries)
     seen_urls: set[str] = set(existing_urls)
     new_entries_written: int = 0
+
     for data in search_queries:
-        print("--" * 50)
         original_product_names = data[0]
         query = data[1]
         normalized_product_names = data[2:]
+
+        # Create a unique identifier for this row to track completion
+        row_id = f"{original_product_names}::{query}".replace("\n", " ").strip()
+
+        # Skip if we already finished this row in a previous run
+        if row_id in processed_rows:
+            logger.info("Skipping already processed row: '%s'", original_product_names)
+            continue
+
+        print("--" * 50)
         logger.info(f"original_product_names = {original_product_names}")
         logger.info(f"query = {query}")
         logger.info(f"normalized_product_names = {normalized_product_names}")
         logger.info("Starting search for query: '%s'", query)
+
         page_num = 1
         candidate_product_entities: list[dict] = []
 
@@ -174,11 +197,19 @@ async def producer(manager: BrowserManager) -> int:
                         original_product_names,
                         *normalized_product_names,
                     ]:
-                        # score1 = similarity_score_claude(name, temp_name)
-                        score2 = similarity_score_gemini(name, temp_name)
-                        # if score1 > max_score or score2 > max_score:
-                        #     max_score = max(score1, score2)
-                        max_score = score2
+                        score_gemini_2 = similarity_score_gemini2(name, temp_name)
+                        score_gemini_1 = similarity_score_gemini(name, temp_name)
+                        score_claude_1 = similarity_score_claude(name, temp_name)
+                        if (
+                            score_gemini_1 > 0.75
+                            or score_gemini_2 > 0.75
+                            or score_claude_1 > 0.75
+                        ):
+                            max_score = max(
+                                score_gemini_2,
+                                score_gemini_1,
+                                score_claude_1,
+                            )
 
                     # Only persist entries with a positive score
                     if max_score < 0.75:
@@ -241,6 +272,7 @@ async def producer(manager: BrowserManager) -> int:
 
                 if page_num > 30:
                     break
+
             best_entity = max(
                 candidate_product_entities,
                 key=lambda entity: entity.get("max_similarity_score", float("-inf")),
@@ -259,6 +291,14 @@ async def producer(manager: BrowserManager) -> int:
                 )
             else:
                 logger.info("No candidate entities found.")
+
+        # ── MARK ROW AS DONE ──────────────────────────────────────────────
+        # We append to state tracking immediately after closing the page for this query.
+        # This prevents duplicate work if the script shuts down at any point.
+        with state_file.open("a", encoding="utf-8") as sf:
+            sf.write(row_id + "\n")
+        processed_rows.add(row_id)
+        logger.info("Row marked as fully completed: '%s'", original_product_names)
 
     logger.info(
         "Producer finished — %d new entries written to producer.json.",
