@@ -90,11 +90,13 @@ _RE_MULTI_SPACE = re.compile(r"[ \t]{2,}")
 _RE_EXTRACT_MEASURE = re.compile(r"\b(\d+(?:ml|g))\b", re.IGNORECASE)
 
 # Alphanumeric code tokens (shade codes, SPF values, model numbers):
-# [FIXED EDGE-CASE 1]: Added \d+ to also capture pure numbers like "01" or "010"
 _RE_EXTRACT_CODE = re.compile(r"\b([a-z]+\d+|\d+[a-z]+|\d+)\b", re.IGNORECASE)
 
 # Pure ASCII word tokens (no digits), minimum 3 chars
 _RE_EXTRACT_ENGLISH_WORD = re.compile(r"\b([a-z]{3,})\b", re.IGNORECASE)
+
+# [FIX]: Extract Pure Persian word tokens, minimum 3 chars
+_RE_EXTRACT_PERSIAN_WORD = re.compile(r"([آ-یپچجگژ]{3,})", re.UNICODE)
 
 _ENGLISH_GATE_EXCLUSIONS: FrozenSet[str] = frozenset(
     {
@@ -156,7 +158,6 @@ def _extract_measures(norm_text: str) -> FrozenSet[str]:
 
 def _extract_codes(norm_text: str) -> FrozenSet[str]:
     candidates = frozenset(c.lower() for c in _RE_EXTRACT_CODE.findall(norm_text))
-    # Exclude measurement tokens — they are alphanumeric but belong to Gate 1
     return candidates - _extract_measures(norm_text)
 
 
@@ -165,6 +166,11 @@ def _extract_english_content_words(norm_text: str) -> FrozenSet[str]:
         w.lower() for w in _RE_EXTRACT_ENGLISH_WORD.findall(norm_text)
     )
     return all_words - _ENGLISH_GATE_EXCLUSIONS
+
+
+# [FIX]: Added extractor for Persian words
+def _extract_persian_content_words(norm_text: str) -> FrozenSet[str]:
+    return frozenset(w for w in _RE_EXTRACT_PERSIAN_WORD.findall(norm_text))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -215,6 +221,30 @@ def _english_words_clash(
     return False
 
 
+# [FIX]: Added clash detector for Persian words
+def _persian_words_clash(
+    excel_words: FrozenSet[str],
+    site_norm: str,
+) -> bool:
+    if not excel_words:
+        return False
+
+    for word in excel_words:
+        if word in site_norm:
+            continue
+
+        # Fuzzy fallback for slight typos in Persian words (Threshold: 85)
+        word_len = len(word)
+        found = any(
+            fuzz.ratio(word, site_norm[i : i + word_len]) >= 85
+            for i in range(max(1, len(site_norm) - word_len + 1))
+        )
+        if not found:
+            return True
+
+    return False
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -240,8 +270,13 @@ def similarity_score(site_product_name: str, excel_product_name: str) -> float:
     if _codes_clash(excel_codes, site_codes):
         return 0.0
 
-    excel_words = _extract_english_content_words(norm_excel)
-    if _english_words_clash(excel_words, norm_site):
+    excel_en_words = _extract_english_content_words(norm_excel)
+    if _english_words_clash(excel_en_words, norm_site):
+        return 0.0
+
+    # [FIX]: Check for missing Persian core words
+    excel_fa_words = _extract_persian_content_words(norm_excel)
+    if _persian_words_clash(excel_fa_words, norm_site):
         return 0.0
 
     set_ratio = fuzz.token_set_ratio(norm_site, norm_excel)
