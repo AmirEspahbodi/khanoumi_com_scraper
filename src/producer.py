@@ -17,8 +17,9 @@ from src.helpers import (
     scroll_to_element,
 )
 from src.producer_store import append_entry, load_producer_json
-from src.similarity_score import similarity_score as similarity_score_claude
-from src.similarity_score_gpt5 import similarity_score as similarity_score_gpt5
+
+# from src.similarity_score_claude import similarity_score as similarity_score_claude
+from src.similarity_score_gemini import similarity_score as similarity_score_gemini
 
 logger = logging.getLogger("producer")
 
@@ -173,10 +174,11 @@ async def producer(manager: BrowserManager) -> int:
                         original_product_names,
                         *normalized_product_names,
                     ]:
-                        score1 = similarity_score_claude(name, temp_name)
-                        score2 = similarity_score_gpt5(name, temp_name)
-                        if score1 > max_score or score2 > max_score:
-                            max_score = max(score1, score2)
+                        # score1 = similarity_score_claude(name, temp_name)
+                        score2 = similarity_score_gemini(name, temp_name)
+                        # if score1 > max_score or score2 > max_score:
+                        #     max_score = max(score1, score2)
+                        max_score = score2
 
                     # Only persist entries with a positive score
                     if max_score < 0.75:
@@ -236,6 +238,9 @@ async def producer(manager: BrowserManager) -> int:
                 await page.wait_for_load_state("domcontentloaded")
                 await detect_bot_challenge(page)
                 page_num += 1
+
+                if page_num > 30:
+                    break
             best_entity = max(
                 candidate_product_entities,
                 key=lambda entity: entity.get("max_similarity_score", float("-inf")),
