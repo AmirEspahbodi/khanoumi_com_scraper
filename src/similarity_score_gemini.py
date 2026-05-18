@@ -65,7 +65,8 @@ RE_CODE_SPACE = re.compile(r"(?<!\w)([a-z]+)\s+(\d+)(?!\w)")
 # ==========================================
 RE_VOL_WEIGHT = re.compile(r"(?<!\w)(\d+(?:ml|g))(?!\w)")
 RE_ALPHANUM = re.compile(r"(?<!\w)([a-z]+\d+)(?!\w)")
-RE_LONE_NUMBER = re.compile(r"(?<!\w)(\d+)(?!\w)")
+RE_LONE_SHADE = re.compile(r"(?<!\w)(\d{2,4})(?!\w)")
+RE_SHADE_WITH_PREFIX = re.compile(r"(?<!\w)(?:شماره|no)\s*(\d{1})(?!\w)")
 RE_ENGLISH_WORD = re.compile(r"(?<!\w)([a-z]+)(?!\w)")
 
 
@@ -113,9 +114,11 @@ def _extract_attributes(text: str) -> Tuple[Set[str], Set[str], Set[str]]:
     # Strip volumes out to avoid re-extracting their numbers as shades
     text_no_vol = RE_VOL_WEIGHT.sub(" ", text)
 
-    # Extract alphanumeric model codes and lone numeric shades
+    # Extract alphanumeric model codes
     codes = set(RE_ALPHANUM.findall(text_no_vol))
-    codes.update(RE_LONE_NUMBER.findall(text_no_vol))
+    codes.update(RE_LONE_SHADE.findall(text_no_vol))
+    codes.update(RE_SHADE_WITH_PREFIX.findall(text_no_vol))
+    # ----------------------------------------------
 
     # Extract any remaining pure English tokens
     english_words = set(RE_ENGLISH_WORD.findall(text_no_vol))
