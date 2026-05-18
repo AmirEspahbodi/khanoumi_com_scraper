@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import logging
 import random
+from cmath import log
 from typing import Any
 
 from playwright.async_api import Locator
 
 from src.browser_manager import BrowserManager
-from src.similarity_score_gpt5 import similarity_score as similarity_score_gpt5
-from src.similarity_score import similarity_score as similarity_score_claude
-from src.config import CFG, get_search_queries
+from src.config import CFG, get_search_data
 from src.helpers import (
     detect_bot_challenge,
     human_delay,
@@ -18,6 +17,8 @@ from src.helpers import (
     scroll_to_element,
 )
 from src.producer_store import append_entry, load_producer_json
+from src.similarity_score import similarity_score as similarity_score_claude
+from src.similarity_score_gpt5 import similarity_score as similarity_score_gpt5
 
 logger = logging.getLogger("producer")
 
@@ -59,7 +60,7 @@ async def producer(manager: BrowserManager) -> int:
     website_url: str = CFG.base_url
 
     # ── Load queries ─────────────────────────────────────────────────────
-    search_queries = get_search_queries()
+    search_queries: tuple[tuple[str, ...]] = get_search_data()
     if not search_queries:
         logger.error("Producer: no search queries loaded — aborting.")
         return 0
@@ -83,11 +84,17 @@ async def producer(manager: BrowserManager) -> int:
     # In-session seen set (across all queries)
     seen_urls: set[str] = set(existing_urls)
     new_entries_written: int = 0
-
-    for query in search_queries:
+    for data in search_queries:
+        print("--" * 50)
+        original_product_names = data[0]
+        query = data[1]
+        normalized_product_names = data[2:]
+        logger.info(f"original_product_names = {original_product_names}")
+        logger.info(f"query = {query}")
+        logger.info(f"normalized_product_names = {normalized_product_names}")
         logger.info("Starting search for query: '%s'", query)
         page_num = 1
-        is_product_found = False
+        candidate_product_entities: list[dict] = []
 
         async with manager.new_page() as page:
             page.set_default_timeout(CFG.navigation_timeout)
@@ -160,43 +167,45 @@ async def producer(manager: BrowserManager) -> int:
                     seen_urls.add(product_url)
 
                     # Extract product name and compute similarity score
+                    max_score = 0
                     name = await get_product_name(card)
-                    score1 = similarity_score_claude(query, name)
-                    score2 = similarity_score_gpt5(query, name)
+                    for temp_name in [
+                        original_product_names,
+                        *normalized_product_names,
+                    ]:
+                        score1 = similarity_score_claude(name, temp_name)
+                        score2 = similarity_score_gpt5(name, temp_name)
+                        if score1 > max_score or score2 > max_score:
+                            max_score = max(score1, score2)
 
                     # Only persist entries with a positive score
-                    if score1 < 0.80 and score2 < 0.80:
+                    if max_score < 0.80:
                         logger.info(
-                            "Skipping low-score product (%.4f), (%.4f): query = %s _ name = %s", score1, score2, query, name
+                            "Skipping low-score product, max-score = (%.4f): query = %s _ name = %s",
+                            max_score,
+                            query,
+                            name,
                         )
                         continue
+                    candidate_product_entities.append(
+                        {
+                            "search_query": query,
+                            "product_url": product_url,
+                            "max_similarity_score": max_score,
+                            "is_scraped": False,
+                            "scrap_directory": "",
+                        }
+                    )
 
-                    entry: dict[str, Any] = {
-                        "search_query": query,
-                        "product_url": product_url,
-                        "similarity_score1": score1,
-                        "similarity_score2": score2,
-                        "is_scraped": False,
-                        "scrap_directory": "",
-                    }
-
-                    # Real-time persistence: write after every single product
-                    await append_entry(entry)
-                    is_product_found=True
                     new_entries_written += 1
                     page_new += 1
 
                     logger.debug(
-                        "Appended entry #%d — score=%.4f,%.4f url=%s",
+                        "Appended entry #%d — max score=%.4f url=%s",
                         new_entries_written,
-                        score1,
-                        score2,
+                        max_score,
                         product_url,
                     )
-                    if is_product_found:
-                        break
-                if is_product_found:
-                    break
 
                 logger.info(
                     "  Page %d → %d new entries written (running total: %d).",
@@ -225,10 +234,19 @@ async def producer(manager: BrowserManager) -> int:
                 await page.wait_for_load_state("domcontentloaded")
                 await detect_bot_challenge(page)
                 page_num += 1
-    if is_product_found:
-        pass
-    else:
-        pass
+        best_entity = max(
+            candidate_product_entities,
+            key=lambda entity: entity.get("max_similarity_score", float("-inf")),
+            default=None,
+        )
+
+        if best_entity:
+            await append_entry(best_entity)
+            logger.info(
+                f"Found best match: {best_entity['product_url']} with score {best_entity['max_similarity_score']}"
+            )
+        else:
+            logger.info("No candidate entities found.")
 
     logger.info(
         "Producer finished — %d new entries written to producer.json.",

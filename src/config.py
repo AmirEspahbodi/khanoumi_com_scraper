@@ -12,7 +12,7 @@ logger = logging.getLogger("scraper")
 # ---------------------------------------------------------------------------
 
 
-def get_search_data(path: str = "Book1.xlsx") -> tuple[tuple[str], ...]:
+def get_search_data(path: str = "Book1.xlsx") -> tuple[tuple[str, ...]]:
     """
     Read search queries from the *second column* of every row in *path*.
     Blank / whitespace-only cells are silently skipped.
@@ -33,13 +33,13 @@ def get_search_data(path: str = "Book1.xlsx") -> tuple[tuple[str], ...]:
     ws = wb.active
     data: list[tuple[str]] = []
     counter = 0
-    for row in ws.iter_rows(min_col=0, max_col=6, values_only=True):
+    for row in ws.iter_rows(min_col=0, max_col=8, values_only=True):
         if counter == 0:
             counter += 1
             continue
         if row[5] is None or str(row[5]).strip().lower() in ["", "nan"]:
             continue
-        data.append((row[2], row[3], row[4], row[5]))
+        data.append((row[1], row[2], row[3], row[4], row[5], row[6], row[7]))
     wb.close()
 
     if not data:
