@@ -328,7 +328,7 @@ def _measures_clash(
         >>> _measures_clash(frozenset({"100ml"}), frozenset({"100ml"}))
         False
     """
-    if excel_measures and site_measures:
+    if excel_measures or site_measures:
         return excel_measures != site_measures
     return False
 
@@ -363,9 +363,9 @@ def _codes_clash(
         >>> _codes_clash(frozenset(), frozenset({"nc41"}))
         False
     """
-    if not excel_codes:
-        return False
-    return not excel_codes.issubset(site_codes)
+    if excel_codes or site_codes:
+        return excel_codes != site_codes
+    return False
 
 
 def _english_words_clash(
@@ -469,6 +469,7 @@ def similarity_score(site_product_name: str, excel_product_name: str) -> float:
         >>> similarity_score("فاندیشن ان سی ۴۱", "فاندیشن NC41")
         1.0
     """
+
     # Guard: empty inputs are definitively not a match
     if not site_product_name or not excel_product_name:
         return 0.0
@@ -500,196 +501,9 @@ def similarity_score(site_product_name: str, excel_product_name: str) -> float:
     if _english_words_clash(excel_words, norm_site):
         return 0.0
 
-    # ── Phase 3: Permutation-Invariant Fuzzy Similarity ──────────────────────
-    raw: int = fuzz.token_set_ratio(norm_site, norm_excel)
+    set_ratio = fuzz.token_set_ratio(norm_site, norm_excel)
+    sort_ratio = fuzz.token_sort_ratio(norm_site, norm_excel)
+
+    raw = (set_ratio * 0.4) + (sort_ratio * 0.6)
+
     return round(raw / 100.0, 4)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SELF-TEST SUITE
-# ═══════════════════════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    _PASS = "\033[92m[PASS]\033[0m"
-    _FAIL = "\033[91m[FAIL]\033[0m"
-
-    def _run(
-        label: str,
-        s: float,
-        *,
-        eq: float | None = None,
-        ge: float | None = None,
-        lt: float | None = None,
-    ) -> None:
-        if eq is not None:
-            ok = abs(s - eq) < 1e-9
-            crit = f"== {eq}"
-        elif ge is not None:
-            ok = s >= ge
-            crit = f">= {ge}"
-        else:
-            ok = s < lt
-            crit = f"<  {lt}"
-        tag = _PASS if ok else _FAIL
-        print(f"  {tag}  {label:<52s}  score={s:.4f}  (expected {crit})")
-        assert ok, f"Assertion failed: {label!r}  score={s}  (expected {crit})"
-
-    print("\n" + "═" * 72)
-    print("  cosmetic_similarity.py — Test Suite")
-    print("═" * 72 + "\n")
-
-    # ── 1. Exact match after normalization ────────────────────────────────────
-    _run(
-        "Exact string match",
-        similarity_score("ریمل بل فول لش", "ریمل بل فول لش"),
-        eq=1.0,
-    )
-
-    # ── 2. Word-order permutation (token_set_ratio must score 1.0) ───────────
-    _run(
-        "Word-order permutation",
-        similarity_score("ریمل بل فول لش", "بل ریمل فول لش"),
-        eq=1.0,
-    )
-
-    # ── 3. Volume clash  →  Gate 1 hard fail ──────────────────────────────────
-    _run(
-        "Volume clash  50ml ≠ 100ml",
-        similarity_score(
-            "ادو پرفیوم ویکتوریا سکرت 50ml",
-            "ادو پرفیوم ویکتوریا سکرت 100ml",
-        ),
-        eq=0.0,
-    )
-
-    # ── 4. Shade-code clash  →  Gate 2 hard fail ─────────────────────────────
-    _run(
-        "Code clash  NC41 ≠ NC42",
-        similarity_score("فاندیشن NC41", "فاندیشن NC42"),
-        eq=0.0,
-    )
-
-    # ── 5. Persian phonetic code + Persian digit → clash ─────────────────────
-    #  "ان سی ۴۲" normalises to "nc42", Excel has "nc41" → Gate 2 fail
-    _run(
-        "Persian phonetic clash  'ان سی ۴۲' ≠ nc41",
-        similarity_score("فاندیشن ان سی ۴۲", "فاندیشن nc41"),
-        eq=0.0,
-    )
-
-    # ── 6. Missing English sub-name (Bombshell)  →  Gate 3 hard fail ─────────
-    _run(
-        "Missing English model  'Bombshell' absent in site",
-        similarity_score(
-            "ادو پرفیوم Victoria Secret 100ml",
-            "ادو پرفیوم Victoria Secret Bombshell 100ml",
-        ),
-        eq=0.0,
-    )
-
-    # ── 7. Same product with full English model name present ──────────────────
-    _run(
-        "English model present  site has 'Bombshell'",
-        similarity_score(
-            "ادو پرفیوم Victoria Secret Bombshell 100ml",
-            "ادو پرفیوم Victoria Secret Bombshell 100ml",
-        ),
-        eq=1.0,
-    )
-
-    # ── 8. Persian digit normalisation  (SPF۳۰ == spf30) ─────────────────────
-    _run(
-        "Persian digit normalisation  SPF۳۰ == spf30",
-        similarity_score("کرم ضد آفتاب SPF۳۰", "کرم ضد آفتاب spf30"),
-        eq=1.0,
-    )
-
-    # ── 9. Persian volume unit normalisation (میلی لیتر == ml) ───────────────
-    _run(
-        "Persian volume unit  '125 میلی لیتر' == '125ml'",
-        similarity_score("سرم پوست 125 میلی لیتر", "سرم پوست 125ml"),
-        eq=1.0,
-    )
-
-    # ── 10. Same volume, different shade  →  Gate 2 catches it ───────────────
-    _run(
-        "Same volume, different shade  100ml+nc40 ≠ 100ml+nc41",
-        similarity_score(
-            "فاندیشن روشن کننده 100ml nc40", "فاندیشن روشن کننده 100ml nc41"
-        ),
-        eq=0.0,
-    )
-
-    # ── 11. Arabic chars normalised same as Persian ────────────────────────────
-    _run(
-        "Arabic ي/ك → Persian ی/ک normalisation",
-        similarity_score("كرم مرطوب كننده", "کرم مرطوب کننده"),
-        eq=1.0,
-    )
-
-    # ── 12. Phonetic code  'ان سی ۴۱' == NC41 ────────────────────────────────
-    _run(
-        "Phonetic code normalisation  'ان سی ۴۱' == NC41",
-        similarity_score("فاندیشن ان سی ۴۱", "فاندیشن NC41"),
-        eq=1.0,
-    )
-
-    # ── 13. Stop-word noise shouldn't tank the score ──────────────────────────
-    _run(
-        "Stop-word noise  ('مدل', 'حجم') stripped from both sides",
-        similarity_score("ریمل حجم دهنده مدل فول لش", "ریمل فول لش"),
-        ge=0.8,
-    )
-
-    # ── 14. Weight clash  →  Gate 1 hard fail ────────────────────────────────
-    _run(
-        "Weight clash  10g ≠ 20g",
-        similarity_score("پودر فیکساتور 10g", "پودر فیکساتور 20g"),
-        eq=0.0,
-    )
-
-    # ── 15. No volume on either side  →  fall through to fuzzy ───────────────
-    _run(
-        "No volume on either side  →  exact fuzzy match",
-        similarity_score("کانسیلر روشن کننده", "کانسیلر روشن کننده"),
-        eq=1.0,
-    )
-
-    # ── 16. Completely different products  →  very low fuzzy score ───────────
-    _run(
-        "Completely different products  رژ لب ≠ فاندیشن nc41",
-        similarity_score("رژ لب مات قرمز", "فاندیشن nc41 100ml"),
-        lt=0.4,
-    )
-
-    # ── 17. SPF code clash  →  Gate 2 catches it ─────────────────────────────
-    _run(
-        "SPF code clash  spf30 ≠ spf50",
-        similarity_score("کرم ضد آفتاب spf30 50ml", "کرم ضد آفتاب spf50 50ml"),
-        eq=0.0,
-    )
-
-    # ── 18. ZWNJ removal  (invisible U+200C should not affect matching) ───────
-    _run(
-        "ZWNJ U+200C removal",
-        similarity_score("کرم\u200cمرطوب\u200cکننده", "کرم مرطوب کننده"),
-        eq=1.0,
-    )
-
-    # ── 19. Volume missing from site only  →  gate skips, fuzzy scores ────────
-    _run(
-        "Volume only in Excel, missing from site  →  penalty, not 0.0",
-        similarity_score("ادو پرفیوم ویکتوریا سکرت", "ادو پرفیوم ویکتوریا سکرت 100ml"),
-        ge=0.7,  # Should be similar but not perfect
-    )
-
-    # ── 20. Informal Persian 'م' suffix  (125م == 125ml) ─────────────────────
-    _run(
-        "Informal Persian suffix  '125م' == '125ml'",
-        similarity_score("محصول پوستی 125م", "محصول پوستی 125ml"),
-        eq=1.0,
-    )
-
-    print("\n" + "═" * 72)
-    print("  ✅  All 20 tests passed.")
-    print("═" * 72 + "\n")

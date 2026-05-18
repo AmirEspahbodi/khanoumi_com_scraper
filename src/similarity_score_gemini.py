@@ -125,9 +125,8 @@ def _extract_attributes(text: str) -> Tuple[Set[str], Set[str], Set[str]]:
 
 def similarity_score(site_product_name: str, excel_product_name: str) -> float:
     """
-    Calculates the exact similarity between two cosmetic product names using Gated Lexical Scoring.
-    Returns 0.0 immediately on hard-gate conflicts (mismatched volumes/codes).
-    Returns a normalized float (0.0 - 1.0) based on permutation-invariant matching.
+    Calculates the exact similarity between two cosmetic product names.
+    Fixed to handle Subset Traps, Asymmetric Codes, and Cross-lingual false negatives.
     """
     # Phase 1: Normalize
     norm_site = _normalize_text(site_product_name)
@@ -138,37 +137,37 @@ def similarity_score(site_product_name: str, excel_product_name: str) -> float:
     excel_vol, excel_codes, excel_eng = _extract_attributes(norm_excel)
 
     # Hard Gate 1: Volume / Weight Clash
-    # Fails if both mention a volume, but they share NO common volume
+    # اگر هر دو حجم دارند، باید حتما اشتراک داشته باشند
     if excel_vol and site_vol:
         if not excel_vol.intersection(site_vol):
             return 0.0
 
-    # Hard Gate 2: Code / Shade Clash
-    # Fails if both mention a shade/code, but they share NO common code
-    if excel_codes and site_codes:
+    # Hard Gate 2: STRICT Code / Shade Clash
+    # اصلاح شد: اگر یکی از آن‌ها کد رنگ/مدل دارد، دیگری هم حتما باید همان کد را داشته باشد
+    # این کار جلوی مچ شدن محصول عمومی (بدون کد) با محصول خاص (کد دار) را می‌گیرد
+    if excel_codes or site_codes:
         if not excel_codes.intersection(site_codes):
             return 0.0
 
-    # Hard Gate 3: English Token / Model Mismatch
-    # Fails if Excel mentions specific English words (like 'Bombshell') that are totally missing in Site
-    if excel_eng:
-        for e_word in excel_eng:
-            match_found = False
-            for s_word in site_eng:
-                # Require an exact match, or a substantive substring match (len >= 3 to prevent single-char falses)
-                if (
-                    e_word == s_word
-                    or (len(s_word) >= 3 and s_word in e_word)
-                    or (len(e_word) >= 3 and e_word in s_word)
-                ):
-                    match_found = True
-                    break
+    # Hard Gate 3: English Word Conflict (Safe Check)
+    # اصلاح شد: بررسی سخت‌گیرانه فقط زمانی انجام می‌شود که "هر دو" کلمه انگلیسی داشته باشند.
+    # این کار از رد شدن اشتباه Bourjois (در اکسل) با بورژوا (در سایت) جلوگیری می‌کند.
+    if excel_eng and site_eng:
+        if not excel_eng.intersection(site_eng):
+            return 0.0
 
-            if not match_found:
-                return 0.0
+    # Phase 3: Permutation-Invariant & Subset-Penalized Similarity
+    # رفع باگِ نام‌های طولانی و کوتاه (تله زیرمجموعه)
 
-    # Phase 3: Permutation-Invariant Similarity
-    # fuzz.token_set_ratio naturally handles word order shifts ("ریمل بل" vs "بل ریمل")
-    score = fuzz.token_set_ratio(norm_site, norm_excel)
+    # set_ratio: ترتیب را نادیده می‌گیرد اما به زیرمجموعه‌ها نمره ۱۰۰ می‌دهد
+    set_ratio = fuzz.token_set_ratio(norm_site, norm_excel)
+
+    # sort_ratio: ترتیب را نادیده می‌گیرد اما اگر طول رشته‌ها فرق کند یا کلمه‌ای جا بیفتد، نمره را به شدت کم می‌کند
+    sort_ratio = fuzz.token_sort_ratio(norm_site, norm_excel)
+
+    # وزن‌دهی ترکیبی (Hybrid Scoring):
+    # با این فرمول، اگر سایت کلمات "Victoria Secret Bombshell" را نداشته باشد،
+    # sort_ratio به شدت افت می‌کند و نمره نهایی را از حد نصاب (مثلا ۸۵٪) پایین می‌کشد.
+    score = (set_ratio * 0.4) + (sort_ratio * 0.6)
 
     return float(score) / 100.0
