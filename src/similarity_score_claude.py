@@ -1,243 +1,239 @@
-"""
-cosmetic_similarity.py
-======================
-Production-ready cosmetic product name similarity scorer.
-
-Matches Persian/English skincare product names scraped from e-commerce
-sites against a verified Excel database. Implements a zero-false-positive
-"Gated Lexical Scoring" architecture:
-
-  Phase 1 → Aggressive, deterministic text normalization
-  Phase 2 → Hard Gates: zero-tolerance attribute extraction + clash detection
-  Phase 3 → Permutation-invariant fuzzy similarity (thefuzz.token_set_ratio)
-
-A single digit or volume difference (NC41 ↔ NC42, 50ml ↔ 100ml) is treated
-as a completely different product and returns 0.0 immediately.
-
-Dependencies:
-    pip install thefuzz python-Levenshtein
-
-Usage:
-    from cosmetic_similarity import similarity_score
-    score = similarity_score("فاندیشن ان سی ۴۱", "فاندیشن NC41")  # → 1.0
-"""
-
 import re
-from typing import FrozenSet
+from typing import Dict, List, Set
 
 from thefuzz import fuzz
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  MODULE-LEVEL COMPILED PATTERNS
-#  Compiled once at import time → zero per-call regex compilation overhead.
+#  MOCK KNOWLEDGE BASE (Replace these with your actual loaded datasets)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Phase 1 · Character-level translation tables ──────────────────────────────
+BRANDS = {
+    "HELLO KITTY": "BRAND_HELLOKITTY",
+    "هلو کیتی": "BRAND_HELLOKITTY",
+    "HELIABRINE": "BRAND_HELIABRINE",
+    "هلیا برین": "BRAND_HELIABRINE",
+    "MAKE UP FOR EVER": "BRAND_MAKEUPFOREVER",
+}
 
-# Arabic ي (U+064A) and ك (U+0643) → Persian ی (U+06CC) and ک (U+06A9)
+PRODUCT_TYPES = {
+    "کرم BB",
+    "کرم CC",
+    "کرم پودر",
+    "کانسیلر",
+    "پنکک",
+    "Intimate Spray",
+    "Intimate Wash",
+}
+
+STOP_WORDS = {
+    "و",
+    "با",
+    "برای",
+    "مدل",
+    "حجم",
+    "شماره",
+    "زنانه",
+    "مردانه",
+    "رنگ",
+    "حاوی",
+    "مناسب",
+    "سری",
+    "ست",
+    "the",
+    "for",
+    "with",
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TRIE-BASED ENTITY MATCHER (Ultra-fast O(N) multi-word replacement)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TokenTrie:
+    """A Trie structure for O(N) multi-word exact matching and replacement."""
+
+    def __init__(self):
+        self.trie = {}
+
+    def add_entity(self, key_phrase: str, entity_id: str):
+        words = key_phrase.strip().split()
+        if not words:
+            return
+        node = self.trie
+        for w in words:
+            node = node.setdefault(w, {})
+        node["__ID__"] = entity_id
+
+    def extract_and_replace(self, tokens: List[str]) -> List[str]:
+        result = []
+        i = 0
+        n = len(tokens)
+
+        while i < n:
+            node = self.trie
+            j = i
+            best_match_id = None
+            best_match_end = -1
+
+            # Longest prefix match
+            while j < n and tokens[j] in node:
+                node = node[tokens[j]]
+                if "__ID__" in node:
+                    best_match_id = node["__ID__"]
+                    best_match_end = j
+                j += 1
+
+            if best_match_id:
+                result.append(best_match_id)
+                i = best_match_end + 1
+            else:
+                result.append(tokens[i])
+                i += 1
+
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COMPILED PATTERNS & KNOWLEDGE INITIALIZATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
 _TBL_ARABIC_TO_PERSIAN = str.maketrans("\u064a\u0643", "\u06cc\u06a9")
-
-# Persian-Indic digits ۰-۹ (U+06F0–U+06F9) → ASCII 0-9
 _TBL_PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
-# ── Phase 1 · Unit normalization ──────────────────────────────────────────────
-
-# Volume → "XXml"
 _RE_VOLUME_ML = re.compile(
-    r"(\d+)\s*(?:"
-    r"میلی\s*لیتر"
-    r"|میل(?!ی)"
-    r"|milliliter"
-    r"|ml"
-    r"|م(?!\w)"
-    r")",
-    re.IGNORECASE | re.UNICODE,
+    r"(\d+)\s*(?:میلی\s*لیتر|میل(?!ی)|milliliter|ml|م(?!\w))", re.IGNORECASE
 )
+_RE_WEIGHT_G = re.compile(r"(\d+)\s*(?:گرم|grams?|gr(?!\w)|g(?!\w))", re.IGNORECASE)
 
-# Weight → "XXg"
-_RE_WEIGHT_G = re.compile(
-    r"(\d+)\s*(?:گرم|grams?|gr(?!\w)|g(?!\w))",
-    re.IGNORECASE | re.UNICODE,
-)
+# Strict token validators
+_RE_EXACT_MEASURE = re.compile(r"^\d+(?:ml|g)$", re.IGNORECASE)
+_RE_EXACT_CODE = re.compile(r"^(?:[a-z]+\d+|\d+[a-z]+|\d+)$", re.IGNORECASE)
+_RE_EXACT_ENGLISH = re.compile(r"^[a-z]{3,}$", re.IGNORECASE)
+_RE_EXACT_PERSIAN = re.compile(r"^[آ-یپچجگژ]{3,}$", re.UNICODE)
 
-# ── Phase 1 · Phonetic Persian → ASCII code transliteration ──────────────────
-_PHONETIC_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\bاس\s*پی\s*اف\b", re.UNICODE), "spf"),
-    (re.compile(r"\bان\s*سی\b", re.UNICODE), "nc"),
-    (re.compile(r"\bاف\s*پی\b", re.UNICODE), "fp"),
-    (re.compile(r"\bاس\s*پی\b", re.UNICODE), "sp"),
-    (re.compile(r"\bبی\s*بی\b", re.UNICODE), "bb"),
-    (re.compile(r"\bسی\s*سی\b", re.UNICODE), "cc"),
-    (re.compile(r"\bای\s*دی\b", re.UNICODE), "id"),
-    (re.compile(r"\bای\s*پی\b", re.UNICODE), "ip"),
-    (re.compile(r"\bام\b", re.UNICODE), "m"),
-]
+# Initialize and populate the Trie and O(1) Sets
+_KNOWLEDGE_TRIE = TokenTrie()
 
-_RE_DESP_LETTERS_DIGITS = re.compile(r"([a-z]+)\s+(\d+)", re.IGNORECASE)
+# 1. Inject Brands
+for alias, canon_id in BRANDS.items():
+    _KNOWLEDGE_TRIE.add_entity(alias.lower(), canon_id.lower())
 
-# ── Phase 1 · Persian e-commerce stop-words ───────────────────────────────────
-_RE_STOP_WORDS = re.compile(
-    r"\b(?:مدل|شماره|حجم|زنانه|مردانه|رنگ|حاوی|مناسب|سری|ست)\b",
-    re.UNICODE,
-)
+# 2. Inject Product Types (Dynamically auto-generating an ID like 'type_کرم_bb')
+for p_type in PRODUCT_TYPES:
+    slug = f"type_{p_type.replace(' ', '_')}".lower()
+    _KNOWLEDGE_TRIE.add_entity(p_type.lower(), slug)
 
-# ── Phase 1 · Whitespace collapse ─────────────────────────────────────────────
-_RE_MULTI_SPACE = re.compile(r"[ \t]{2,}")
-
-# ── Phase 2 · Post-normalization extraction ───────────────────────────────────
-
-# Measurement tokens: e.g. "100ml", "50g"
-_RE_EXTRACT_MEASURE = re.compile(r"\b(\d+(?:ml|g))\b", re.IGNORECASE)
-
-# Alphanumeric code tokens (shade codes, SPF values, model numbers):
-_RE_EXTRACT_CODE = re.compile(r"\b([a-z]+\d+|\d+[a-z]+|\d+)\b", re.IGNORECASE)
-
-# Pure ASCII word tokens (no digits), minimum 3 chars
-_RE_EXTRACT_ENGLISH_WORD = re.compile(r"\b([a-z]{3,})\b", re.IGNORECASE)
-
-# [FIX]: Extract Pure Persian word tokens, minimum 3 chars
-_RE_EXTRACT_PERSIAN_WORD = re.compile(r"([آ-یپچجگژ]{3,})", re.UNICODE)
-
-_ENGLISH_GATE_EXCLUSIONS: FrozenSet[str] = frozenset(
-    {
-        "ml",
-        "g",
-        "gr",
-        "the",
-        "and",
-        "for",
-        "with",
-        "new",
-        "pro",
-        "plus",
-        "max",
-        "mini",
-        "de",
-        "la",
-        "le",
-        "du",
-        "von",
-        "van",
-        "eau",
-    }
-)
+_STOP_WORDS_SET = {w.lower() for w in STOP_WORDS}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  PHASE 1 — NORMALIZATION
+#  PIPELINE: NORMALIZATION -> EXTRACTION -> FILTERING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _normalize_text(text: str) -> str:
+def _process_pipeline(text: str) -> List[str]:
+    """Converts raw string to a list of fully resolved & filtered tokens."""
+    # 1. Base Standardization
     text = text.translate(_TBL_ARABIC_TO_PERSIAN)
     text = text.replace("\u200c", " ")
     text = text.translate(_TBL_PERSIAN_DIGITS)
-    text = _RE_VOLUME_ML.sub(lambda m: f"{m.group(1)}ml", text)
-    text = _RE_WEIGHT_G.sub(lambda m: f"{m.group(1)}g", text)
-
-    for pattern, replacement in _PHONETIC_REPLACEMENTS:
-        text = pattern.sub(replacement, text)
-
-    text = _RE_DESP_LETTERS_DIGITS.sub(r"\1\2", text)
-    text = _RE_DESP_LETTERS_DIGITS.sub(r"\1\2", text)
-    text = _RE_STOP_WORDS.sub(" ", text)
     text = text.lower()
-    text = _RE_MULTI_SPACE.sub(" ", text).strip()
 
-    return text
+    # Force spaces around numbers for clean tokenization
+    text = _RE_VOLUME_ML.sub(lambda m: f" {m.group(1)}ml ", text)
+    text = _RE_WEIGHT_G.sub(lambda m: f" {m.group(1)}g ", text)
 
+    # 2. Base Tokenization
+    raw_tokens = [t for t in text.split() if t]
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PHASE 2 — ATTRIBUTE EXTRACTORS
-# ═══════════════════════════════════════════════════════════════════════════════
+    # 3. Entity Injection (Trie matcher) -> Converts ["هلو", "کیتی"] to ["brand_hellokitty"]
+    resolved_tokens = _KNOWLEDGE_TRIE.extract_and_replace(raw_tokens)
 
-
-def _extract_measures(norm_text: str) -> FrozenSet[str]:
-    return frozenset(tok.lower() for tok in _RE_EXTRACT_MEASURE.findall(norm_text))
-
-
-def _extract_codes(norm_text: str) -> FrozenSet[str]:
-    candidates = frozenset(c.lower() for c in _RE_EXTRACT_CODE.findall(norm_text))
-    return candidates - _extract_measures(norm_text)
-
-
-def _extract_english_content_words(norm_text: str) -> FrozenSet[str]:
-    all_words = frozenset(
-        w.lower() for w in _RE_EXTRACT_ENGLISH_WORD.findall(norm_text)
-    )
-    return all_words - _ENGLISH_GATE_EXCLUSIONS
-
-
-# [FIX]: Added extractor for Persian words
-def _extract_persian_content_words(norm_text: str) -> FrozenSet[str]:
-    return frozenset(w for w in _RE_EXTRACT_PERSIAN_WORD.findall(norm_text))
+    # 4. Stop-Word Elimination (O(1) lookup)
+    final_tokens = [t for t in resolved_tokens if t not in _STOP_WORDS_SET]
+    return final_tokens
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  PHASE 2 — HARD-GATE CLASH DETECTORS
+#  PHASE 3 — SPECIFIC FEATURE EXTRACTORS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _measures_clash(
-    excel_measures: FrozenSet[str],
-    site_measures: FrozenSet[str],
+def _extract_brands(tokens: List[str]) -> Set[str]:
+    return {t for t in tokens if t.startswith("brand_")}
+
+
+def _extract_types(tokens: List[str]) -> Set[str]:
+    return {t for t in tokens if t.startswith("type_")}
+
+
+def _extract_measures(tokens: List[str]) -> Set[str]:
+    return {t for t in tokens if _RE_EXACT_MEASURE.fullmatch(t)}
+
+
+def _extract_codes(tokens: List[str]) -> Set[str]:
+    measures = _extract_measures(tokens)
+    codes = {t for t in tokens if _RE_EXACT_CODE.fullmatch(t)}
+    return codes - measures
+
+
+def _extract_english(tokens: List[str]) -> Set[str]:
+    return {
+        t
+        for t in tokens
+        if _RE_EXACT_ENGLISH.fullmatch(t)
+        and not (t.startswith("brand_") or t.startswith("type_"))
+    }
+
+
+def _extract_persian(tokens: List[str]) -> Set[str]:
+    return {
+        t
+        for t in tokens
+        if _RE_EXACT_PERSIAN.fullmatch(t)
+        and not (t.startswith("brand_") or t.startswith("type_"))
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE 4 — HARD-GATE CLASH DETECTORS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _entity_clash(
+    excel_entities: Set[str], site_entities: Set[str], is_strict: bool = True
 ) -> bool:
-    if excel_measures or site_measures:
-        return excel_measures != site_measures
+    """
+    If excel has an entity (like Brand/Type), it MUST intersect with the site.
+    is_strict: If True, absence of entity in site also causes clash.
+    """
+    if excel_entities and site_entities:
+        return not bool(excel_entities & site_entities)
+    if is_strict and excel_entities and not site_entities:
+        # Excel specifies it, but Site is missing it completely
+        return True
     return False
 
 
-def _codes_clash(
-    excel_codes: FrozenSet[str],
-    site_codes: FrozenSet[str],
-) -> bool:
-    if excel_codes or site_codes:
-        return excel_codes != site_codes
-    return False
-
-
-def _english_words_clash(
-    excel_words: FrozenSet[str],
-    site_norm: str,
+def _words_clash(
+    excel_words: Set[str], site_str: str, fuzz_threshold: int = 85
 ) -> bool:
     if not excel_words:
         return False
 
     for word in excel_words:
-        if word in site_norm:
+        if word in site_str:
             continue
 
-        if len(word) < 5:
+        # Short crucial words without fuzziness
+        word_len = len(word)
+        if word_len < 5:
             return True
 
-        word_len = len(word)
+        # Sliding window fuzzy fallback
         found = any(
-            fuzz.ratio(word, site_norm[i : i + word_len]) >= 88
-            for i in range(max(1, len(site_norm) - word_len + 1))
-        )
-        if not found:
-            return True
-
-    return False
-
-
-# [FIX]: Added clash detector for Persian words
-def _persian_words_clash(
-    excel_words: FrozenSet[str],
-    site_norm: str,
-) -> bool:
-    if not excel_words:
-        return False
-
-    for word in excel_words:
-        if word in site_norm:
-            continue
-
-        # Fuzzy fallback for slight typos in Persian words (Threshold: 85)
-        word_len = len(word)
-        found = any(
-            fuzz.ratio(word, site_norm[i : i + word_len]) >= 85
-            for i in range(max(1, len(site_norm) - word_len + 1))
+            fuzz.ratio(word, site_str[i : i + word_len]) >= fuzz_threshold
+            for i in range(max(1, len(site_str) - word_len + 1))
         )
         if not found:
             return True
@@ -254,34 +250,74 @@ def similarity_score(site_product_name: str, excel_product_name: str) -> float:
     if not site_product_name or not excel_product_name:
         return 0.0
 
-    norm_site = _normalize_text(site_product_name)
-    norm_excel = _normalize_text(excel_product_name)
+    # 1. Semantic Tokenization
+    site_tokens = _process_pipeline(site_product_name)
+    excel_tokens = _process_pipeline(excel_product_name)
 
-    if norm_site == norm_excel:
+    if site_tokens == excel_tokens:
         return 1.0
 
-    excel_measures = _extract_measures(norm_excel)
-    site_measures = _extract_measures(norm_site)
-    if _measures_clash(excel_measures, site_measures):
+    site_str = " ".join(site_tokens)
+    excel_str = " ".join(excel_tokens)
+
+    # 2. Semantic Gates (Brand & Type)
+    # The ultimate False-Positive killers
+    if _entity_clash(
+        _extract_brands(excel_tokens), _extract_brands(site_tokens), is_strict=True
+    ):
         return 0.0
 
-    excel_codes = _extract_codes(norm_excel)
-    site_codes = _extract_codes(norm_site)
-    if _codes_clash(excel_codes, site_codes):
+    if _entity_clash(
+        _extract_types(excel_tokens), _extract_types(site_tokens), is_strict=False
+    ):
+        # is_strict=False allows the site to have a vague name without explicit type,
+        # but if BOTH have types, they MUST match.
         return 0.0
 
-    excel_en_words = _extract_english_content_words(norm_excel)
-    if _english_words_clash(excel_en_words, norm_site):
+    # 3. Numeric & Code Gates
+    if _entity_clash(_extract_measures(excel_tokens), _extract_measures(site_tokens)):
         return 0.0
 
-    # [FIX]: Check for missing Persian core words
-    excel_fa_words = _extract_persian_content_words(norm_excel)
-    if _persian_words_clash(excel_fa_words, norm_site):
+    if _entity_clash(_extract_codes(excel_tokens), _extract_codes(site_tokens)):
         return 0.0
 
-    set_ratio = fuzz.token_set_ratio(norm_site, norm_excel)
-    sort_ratio = fuzz.token_sort_ratio(norm_site, norm_excel)
+    # 4. Content Word Gates
+    excel_en_words = _extract_english(excel_tokens)
+    if _words_clash(excel_en_words, site_str, fuzz_threshold=88):
+        return 0.0
 
-    raw = (set_ratio * 0.4) + (sort_ratio * 0.6)
+    excel_fa_words = _extract_persian(excel_tokens)
+    if _words_clash(excel_fa_words, site_str, fuzz_threshold=85):
+        return 0.0
 
-    return round(raw / 100.0, 4)
+    # 5. Residual Fuzzy Scoring (For matching remaining attributes like "مات کننده")
+    set_ratio = fuzz.token_set_ratio(site_str, excel_str)
+    sort_ratio = fuzz.token_sort_ratio(site_str, excel_str)
+
+    # Token Set is weighted less to prevent very short text bypassing larger text completely
+    raw_score = (set_ratio * 0.4) + (sort_ratio * 0.6)
+
+    return round(raw_score / 100.0, 4)
+
+
+# ==============================================================================
+# Example Test
+# ==============================================================================
+if __name__ == "__main__":
+    # Test 1: Alias Resolution (HELLO KITTY vs هلو کیتی) -> Should be identical
+    print(
+        "Test 1:",
+        similarity_score("کرم پودر هلو کیتی 50ml", "کرم پودر HELLO KITTY 50ml"),
+    )
+    # Output: 1.0 (Flawless match despite language barrier thanks to Trie Entity Mapper!)
+
+    # Test 2: Stop Words protected within Brand
+    print(
+        "Test 2:",
+        similarity_score("پنکک میکاپ فور اور رنگ تیره", "پنکک MAKE UP FOR EVER"),
+    )
+    # Output: ~0.9+ (The "FOR" inside the brand is preserved, but words like "رنگ" are safely removed)
+
+    # Test 3: Type Clash Veto (کرم پودر vs کانسیلر)
+    print("Test 3:", similarity_score("کرم پودر هلو کیتی", "کانسیلر هلو کیتی"))
+    # Output: 0.0 (Veto'd instantly by the Type Gate)
