@@ -14,7 +14,7 @@ load_dotenv(override=True)
 # Configuration
 INPUT_FILE = "Book1.xlsx"
 COLUMN_NAME = "title"
-MODEL_NAME = "gemini-3-flash-preview"
+MODEL_NAME = "gemini-3.1-flash-lite"
 
 
 # Define the Pydantic schema for structured output

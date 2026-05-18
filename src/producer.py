@@ -179,17 +179,19 @@ async def producer(manager: BrowserManager) -> int:
                             max_score = max(score1, score2)
 
                     # Only persist entries with a positive score
-                    if max_score < 0.80:
+                    if max_score < 0.75:
                         logger.info(
                             "Skipping low-score product, max-score = (%.4f): query = %s _ name = %s",
                             max_score,
-                            query,
+                            original_product_names,
                             name,
                         )
                         continue
                     candidate_product_entities.append(
                         {
+                            "excel_product_name": original_product_names,
                             "search_query": query,
+                            "website_product_name": name,
                             "product_url": product_url,
                             "max_similarity_score": max_score,
                             "is_scraped": False,
@@ -208,7 +210,7 @@ async def producer(manager: BrowserManager) -> int:
                     )
 
                 logger.info(
-                    "  Page %d → %d new entries written (running total: %d).",
+                    "  Page %d → %d new entries (running total: %d).",
                     page_num,
                     page_new,
                     new_entries_written,
@@ -234,19 +236,24 @@ async def producer(manager: BrowserManager) -> int:
                 await page.wait_for_load_state("domcontentloaded")
                 await detect_bot_challenge(page)
                 page_num += 1
-        best_entity = max(
-            candidate_product_entities,
-            key=lambda entity: entity.get("max_similarity_score", float("-inf")),
-            default=None,
-        )
-
-        if best_entity:
-            await append_entry(best_entity)
-            logger.info(
-                f"Found best match: {best_entity['product_url']} with score {best_entity['max_similarity_score']}"
+            best_entity = max(
+                candidate_product_entities,
+                key=lambda entity: entity.get("max_similarity_score", float("-inf")),
+                default=None,
             )
-        else:
-            logger.info("No candidate entities found.")
+
+            if best_entity:
+                await append_entry(best_entity)
+
+                logger.info(
+                    "an entries written for product -- %s --.",
+                    original_product_names,
+                )
+                logger.info(
+                    f"Found best match: {best_entity['product_url']} with score {best_entity['max_similarity_score']}"
+                )
+            else:
+                logger.info("No candidate entities found.")
 
     logger.info(
         "Producer finished — %d new entries written to producer.json.",
