@@ -171,7 +171,8 @@ async def producer(manager: BrowserManager) -> int:
                     )
                     break
 
-                page_new = 0
+                page_new_entity = 0
+
                 for card in products:
                     # Extract href from the <a> tag inside the card
                     link_locator = card.locator("a")
@@ -190,9 +191,11 @@ async def producer(manager: BrowserManager) -> int:
                         continue
                     seen_urls.add(product_url)
 
-                    # Extract product name and compute similarity score
-                    max_score = 0
                     name = await get_product_name(card)
+                    # Extract product name and compute similarity score
+                    temp_avg_score = []
+                    avg_score = 0
+                    max_score = 0
                     for temp_name in [
                         original_product_names,
                         *normalized_product_names,
@@ -200,53 +203,72 @@ async def producer(manager: BrowserManager) -> int:
                         score_gemini_2 = similarity_score_gemini2(name, temp_name)
                         score_gemini_1 = similarity_score_gemini(name, temp_name)
                         score_claude_1 = similarity_score_claude(name, temp_name)
+
                         if (
-                            score_gemini_1 > 0.75
-                            or score_gemini_2 > 0.75
-                            or score_claude_1 > 0.75
+                            score_gemini_1 > 0.60
+                            or score_gemini_2 > 0.60
+                            or score_claude_1 > 0.60
                         ):
+                            temp_avg_score.append(
+                                (score_gemini_2 + score_gemini_1 + score_claude_1) / 3
+                            )
                             max_score = max(
+                                max_score,
                                 score_gemini_2,
                                 score_gemini_1,
                                 score_claude_1,
                             )
-
+                    if temp_avg_score:
+                        avg_score = max(temp_avg_score)
+                    print("here")
                     # Only persist entries with a positive score
-                    if max_score < 0.75:
+                    if avg_score > 0.70:
+                        candidate_product_entities.append(
+                            {
+                                "excel_product_name": original_product_names,
+                                "search_query": query,
+                                "website_product_name": name,
+                                "product_url": product_url,
+                                "avg_similarity_score": avg_score,
+                                "max_similarity_score": max_score,
+                                "is_scraped": False,
+                                "scrap_directory": "",
+                            }
+                        )
+                    elif max_score > 0.70:
+                        candidate_product_entities.append(
+                            {
+                                "excel_product_name": original_product_names,
+                                "search_query": query,
+                                "website_product_name": name,
+                                "product_url": product_url,
+                                "avg_similarity_score": avg_score,
+                                "max_similarity_score": max_score,
+                                "is_scraped": False,
+                                "scrap_directory": "",
+                            }
+                        )
+                    else:
                         logger.info(
-                            "Skipping low-score product, max-score = (%.4f): query = %s _ name = %s",
+                            "Skipping low-score product, avg-score = (%.4f), max-score = (%.4f): query = %s _ name = %s",
+                            avg_score,
                             max_score,
                             original_product_names,
                             name,
                         )
-                        continue
-                    candidate_product_entities.append(
-                        {
-                            "excel_product_name": original_product_names,
-                            "search_query": query,
-                            "website_product_name": name,
-                            "product_url": product_url,
-                            "max_similarity_score": max_score,
-                            "is_scraped": False,
-                            "scrap_directory": "",
-                        }
-                    )
+                    page_new_entity += 1
 
-                    new_entries_written += 1
-                    page_new += 1
-
-                    logger.debug(
-                        "Appended entry #%d — max score=%.4f url=%s",
-                        new_entries_written,
+                    logger.info(
+                        "Appended entry — avg score=%.4f, max score = %.4f, url=%s",
+                        avg_score,
                         max_score,
                         product_url,
                     )
 
                 logger.info(
-                    "  Page %d → %d new entries (running total: %d).",
+                    "  Page %d → %d new entries appended to list.",
                     page_num,
-                    page_new,
-                    new_entries_written,
+                    page_new_entity,
                 )
 
                 # ── Next page ────────────────────────────────────────────
@@ -273,22 +295,42 @@ async def producer(manager: BrowserManager) -> int:
                 if page_num > 30:
                     break
 
-            best_entity = max(
+            best_avg_entity = max(
+                candidate_product_entities,
+                key=lambda entity: entity.get("avg_similarity_score", float("-inf")),
+                default=None,
+            )
+            best_max_entity = max(
                 candidate_product_entities,
                 key=lambda entity: entity.get("max_similarity_score", float("-inf")),
                 default=None,
             )
 
-            if best_entity:
-                await append_entry(best_entity)
+            if best_avg_entity:
+                await append_entry(best_avg_entity)
 
                 logger.info(
-                    "an entries written for product -- %s --.",
+                    "an entries written for product -- %s -- by avg score.",
                     original_product_names,
                 )
                 logger.info(
-                    f"Found best match: {best_entity['product_url']} with score {best_entity['max_similarity_score']}"
+                    f"Found best match: {best_avg_entity['product_url']} with avg score {best_avg_entity['avg_similarity_score']}"
                 )
+                new_entries_written += 1
+            else:
+                logger.info("No candidate entities found.")
+
+            if best_max_entity:
+                await append_entry(best_max_entity)
+
+                logger.info(
+                    "an entries written for product -- %s -- by max score.",
+                    original_product_names,
+                )
+                logger.info(
+                    f"Found best match: {best_max_entity['product_url']} withmax  score {best_max_entity['avg_similarity_score']}"
+                )
+                new_entries_written += 1
             else:
                 logger.info("No candidate entities found.")
 
