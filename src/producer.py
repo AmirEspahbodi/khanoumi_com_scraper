@@ -143,7 +143,7 @@ async def producer(manager: BrowserManager) -> int:
 
             # ── Pagination loop ──────────────────────────────────────────
             while True:
-                await human_delay(4.0, 5.0)
+                await human_delay(9.0, 10.0)
                 logger.info(
                     "Producer scraping page %d for query '%s' …", page_num, query
                 )
@@ -178,6 +178,10 @@ async def producer(manager: BrowserManager) -> int:
                     link_locator = card.locator("a")
                     href = await link_locator.get_attribute("href")
                     if not href:
+                        logger.info("url of product didn't found!")
+                        logger.debug(
+                            f"{'---' * 50}\nhtml content of this card is: \n{await card.inner_html()}\n {'---' * 50}\n"
+                        )
                         continue
 
                     # Normalise to absolute URL
@@ -185,11 +189,6 @@ async def producer(manager: BrowserManager) -> int:
                         product_url = href
                     else:
                         product_url = f"{CFG.base_url}{href.lstrip('/')}"
-
-                    # Dedup against all seen URLs (existing + this session)
-                    if product_url in seen_urls:
-                        continue
-                    seen_urls.add(product_url)
 
                     name = await get_product_name(card)
                     # Extract product name and compute similarity score
@@ -220,7 +219,6 @@ async def producer(manager: BrowserManager) -> int:
                             )
                     if temp_avg_score:
                         avg_score = max(temp_avg_score)
-                    print("here")
                     # Only persist entries with a positive score
                     if avg_score > 0.70:
                         candidate_product_entities.append(
@@ -256,6 +254,7 @@ async def producer(manager: BrowserManager) -> int:
                             original_product_names,
                             name,
                         )
+                        continue
                     page_new_entity += 1
 
                     logger.info(
@@ -306,7 +305,7 @@ async def producer(manager: BrowserManager) -> int:
                 default=None,
             )
 
-            if best_avg_entity:
+            if best_avg_entity and best_avg_entity["avg_similarity_score"] >= 0.70:
                 await append_entry(best_avg_entity)
 
                 logger.info(
@@ -317,21 +316,24 @@ async def producer(manager: BrowserManager) -> int:
                     f"Found best match: {best_avg_entity['product_url']} with avg score {best_avg_entity['avg_similarity_score']}"
                 )
                 new_entries_written += 1
-            else:
-                logger.info("No candidate entities found.")
 
-            if best_max_entity:
-                await append_entry(best_max_entity)
+            if best_max_entity and best_max_entity["max_similarity_score"] >= 0.7:
+                if not (
+                    best_avg_entity
+                    and best_avg_entity["product_url"] == best_max_entity["product_url"]
+                ):
+                    await append_entry(best_max_entity)
 
-                logger.info(
-                    "an entries written for product -- %s -- by max score.",
-                    original_product_names,
-                )
-                logger.info(
-                    f"Found best match: {best_max_entity['product_url']} withmax  score {best_max_entity['avg_similarity_score']}"
-                )
-                new_entries_written += 1
-            else:
+                    logger.info(
+                        "an entries written for product -- %s -- by max score.",
+                        original_product_names,
+                    )
+                    logger.info(
+                        f"Found best match: {best_max_entity['product_url']} withmax  score {best_max_entity['avg_similarity_score']}"
+                    )
+                    new_entries_written += 1
+
+            if not best_max_entity and not best_avg_entity:
                 logger.info("No candidate entities found.")
 
         # ── MARK ROW AS DONE ──────────────────────────────────────────────
